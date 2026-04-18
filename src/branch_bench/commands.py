@@ -86,6 +86,8 @@ def parse_jmh_json(path: Path) -> list[BenchmarkResult]:
     for entry in data:
         metric = entry.get("primaryMetric", {})
         params = entry.get("params") or None
+        nested = metric.get("rawData") or []
+        flat_raw = [v for fork in nested for v in fork] or None
         results.append(
             BenchmarkResult(
                 benchmark=entry["benchmark"],
@@ -94,6 +96,7 @@ def parse_jmh_json(path: Path) -> list[BenchmarkResult]:
                 score_error=float(metric["scoreError"]) if metric.get("scoreError") not in (None, "NaN") else None,
                 unit=metric.get("scoreUnit", ""),
                 params=params,
+                raw_data=flat_raw,
             )
         )
     return results

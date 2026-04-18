@@ -47,10 +47,13 @@ def bisect_order(n: int) -> list[int]:
 
 def _infer_event(fg: Path) -> str:
     name = fg.stem.lower()
-    if "alloc" in name:
-        return "alloc"
-    if "wall" in name:
-        return "wall"
+    for base in ("alloc", "wall", "lock", "cpu"):
+        if base in name:
+            if "reverse" in name:
+                return f"{base}-reverse"
+            if "forward" in name:
+                return f"{base}-forward"
+            return base
     return "cpu"
 
 
@@ -150,14 +153,24 @@ def run_branch(
         log(f"Merge base with main/master: {merge_base[:8]} — limiting to branch-only commits")
     commits = git.list_commits(repo_path, cfg.repo.branch, max_count=max_commits, exclude_before=merge_base)
 
+    def _find(sha: str) -> int | None:
+        for i, c in enumerate(commits):
+            if c.sha.startswith(sha) or c.short_sha.startswith(sha):
+                return i
+        return None
+
     if from_sha:
-        shas = [c.sha for c in commits]
-        if from_sha in shas:
-            commits = commits[shas.index(from_sha):]
+        idx = _find(from_sha)
+        if idx is None:
+            log(f"[!] --from-sha {from_sha!r} not found on branch — aborting.")
+            return
+        commits = commits[idx:]
     if to_sha:
-        shas = [c.sha for c in commits]
-        if to_sha in shas:
-            commits = commits[: shas.index(to_sha) + 1]
+        idx = _find(to_sha)
+        if idx is None:
+            log(f"[!] --to-sha {to_sha!r} not found on branch — aborting.")
+            return
+        commits = commits[: idx + 1]
 
     if not commits:
         log("No commits found.")
@@ -166,7 +179,7 @@ def run_branch(
     log(f"Found {len(commits)} commit(s) on branch '{cfg.repo.branch}'")
 
     # Persist all commits up front so the placeholder report shows the full list
-    for commit in commits:
+    for i, commit in enumerate(commits):
         store.save_commit(
             sha=commit.sha,
             short_sha=commit.short_sha,
@@ -174,7 +187,17 @@ def run_branch(
             author=commit.author,
             timestamp=commit.timestamp,
             branch=cfg.repo.branch,
+            position=i,
+            tree_sha=commit.tree_sha,
         )
+
+    # Retire commits left over from a previous branch incarnation (e.g. after rebase).
+    # Only safe when we have a complete, unfiltered view of the branch.
+    if not from_sha and not to_sha and max_commits is None:
+        current_shas = {c.sha for c in commits}
+        retired = store.retire_stale_commits(current_shas)
+        if retired:
+            log(f"  Retired {retired} stale commit(s) no longer on branch")
 
     report_path = Path(cfg.output.report)
     if live_report:
@@ -189,9 +212,20 @@ def run_branch(
         for pos, idx in enumerate(indices):
             commit = commits[idx]
 
-            if skip_existing and store.has_runs(commit.sha):
+            if skip_existing and store.has_runs(commit.sha, run_benchmarks=run_benchmarks, run_tests=run_tests):
                 log(f"  Skipping {commit.short_sha} (already has runs — use --all to re-run)")
                 continue
+
+            if skip_existing and commit.tree_sha:
+                source = store.find_run_by_tree_sha(commit.tree_sha, exclude_sha=commit.sha)
+                if source:
+                    log(f"[{pos+1}/{len(indices)}] {commit.short_sha} — tree identical to {source['short_sha']}, reusing results")
+                    store.clone_run(source["run_id"], commit.sha, reused_from_sha=source["short_sha"])
+                    if live_report:
+                        generate(store, report_path)
+                    if first_run:
+                        first_run = False
+                    continue
 
             log(f"[{pos+1}/{len(indices)}] {commit.short_sha}")
             ok = run_commit(
@@ -214,6 +248,8 @@ def run_branch(
                     log(f"[!] Commit 0 ({commit.short_sha}) failed tests or benchmarks — aborting.")
                     log("    Fix the baseline or use --no-test / --no-bench to skip checks.")
                     return
+    except KeyboardInterrupt:
+        log("\n[!] Interrupted.")
     finally:
         log(f"Restoring {original_ref}...")
         git.restore(repo_path, original_ref)

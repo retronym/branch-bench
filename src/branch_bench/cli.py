@@ -11,6 +11,7 @@ from .config import load_config, TEMPLATE
 from .runner import run_branch
 from .report import generate
 from .storage import Store
+from . import git
 
 CONFIG_FILE = "bench.toml"
 
@@ -102,9 +103,15 @@ def report(config: str) -> None:
 
 
 def _do_report(cfg) -> None:
+    repo_path = Path(cfg.repo.path).resolve()
     store = Store(Path(cfg.output.db))
     out = Path(cfg.output.report)
     try:
+        merge_base = git.find_merge_base(repo_path, cfg.repo.branch)
+        commits = git.list_commits(repo_path, cfg.repo.branch, exclude_before=merge_base)
+        retired = store.retire_stale_commits({c.sha for c in commits})
+        if retired:
+            click.echo(f"  Retired {retired} stale commit(s) no longer on branch")
         generate(store, out)
     finally:
         store.close()
