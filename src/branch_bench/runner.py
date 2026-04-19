@@ -8,7 +8,7 @@ from typing import Callable
 from . import git, commands
 from .config import Config
 from .git import Commit
-from .report import generate
+from .report import generate, generate_index
 from .storage import Store
 
 
@@ -62,7 +62,6 @@ def run_commit(
     cfg: Config,
     store: Store,
     repo_path: Path,
-    profiles_dir: Path,
     run_tests: bool,
     run_benchmarks: bool,
     log: Callable[[str], None],
@@ -90,13 +89,16 @@ def run_commit(
     if run_benchmarks and cfg.commands.bench_cmd:
         resolved_cmd = cfg.commands.bench_cmd.replace("{out}", "<jmh-results.json>").replace("{out_dir}", "<profiles-dir>")
         log(f"  $ {resolved_cmd}")
-        jmh_dir = profiles_dir.parent / "jmh"
+        epoch = store.current_epoch()
+        run_number = store.run_number_for_id(run_id)
+        run_dir = cfg.run_assets_dir(epoch, commit.short_sha, commit.message, run_number)
+        run_dir.mkdir(parents=True, exist_ok=True)
         try:
             bench_results, svgs, bench_output, saved_json = commands.run_bench(
                 cfg.commands.bench_cmd,
                 repo_path,
-                jmh_save_dir=jmh_dir,
-                jmh_save_name=f"{commit.short_sha}-{run_id}",
+                jmh_save_dir=run_dir,
+                jmh_save_name="jmh-results",
             )
             store.save_bench_output(run_id, bench_output)
             if saved_json:
@@ -106,7 +108,7 @@ def run_commit(
             log(f"  Benchmarks: {len(bench_results)} result(s)")
 
             for svg in svgs:
-                dest = profiles_dir / f"{commit.short_sha}-{svg.name}"
+                dest = run_dir / svg.name
                 shutil.move(str(svg), dest)
                 event = _infer_event(dest)
                 rel = dest.relative_to(Path.cwd()) if dest.is_absolute() else dest
@@ -139,8 +141,7 @@ def run_branch(
     log: Callable[[str], None] = lambda s: print(s, file=sys.stderr),
 ) -> None:
     repo_path = Path(cfg.repo.path).resolve()
-    profiles_dir = Path(cfg.output.profiles_dir)
-    profiles_dir.mkdir(parents=True, exist_ok=True)
+    cfg.base_dir().mkdir(parents=True, exist_ok=True)
 
     if git.is_dirty(repo_path):
         log("[!] Working tree is dirty — stash or commit changes before running.")
@@ -223,9 +224,11 @@ def run_branch(
             log("No matching commits to run.")
             return
 
-    report_path = Path(cfg.output.report)
+    epoch = store.current_epoch()
+    report_path = cfg.report_path(epoch)
     if live_report:
         generate(store, report_path)
+        generate_index(cfg)
         log(f"Report: {report_path.resolve()}")
         log("(refresh after each commit completes)\n")
 
@@ -238,6 +241,10 @@ def run_branch(
 
             if skip_existing and store.has_runs(commit.sha, run_benchmarks=run_benchmarks, run_tests=run_tests):
                 log(f"  Skipping {commit.short_sha} (already has runs — use --all to re-run)")
+                # Note: existing runs shadow tree-SHA matches from newer re-benches on rebased
+                # counterparts. If you rebased, re-benched, then reverted, this commit will show
+                # its pre-rebase results. Use --sha <sha> --all to add a fresh run, then switch
+                # to Aggregate mode in the report, or run `branch-bench epoch` for a clean slate.
                 continue
 
             if skip_existing and commit.tree_sha:
@@ -247,6 +254,7 @@ def run_branch(
                     store.clone_run(source["run_id"], commit.sha, reused_from_sha=source["short_sha"])
                     if live_report:
                         generate(store, report_path)
+                        generate_index(cfg)
                     if first_run:
                         first_run = False
                     continue
@@ -257,13 +265,13 @@ def run_branch(
                 cfg=cfg,
                 store=store,
                 repo_path=repo_path,
-                profiles_dir=profiles_dir,
                 run_tests=run_tests,
                 run_benchmarks=run_benchmarks,
                 log=log,
             )
             if live_report:
                 generate(store, report_path)
+                generate_index(cfg)
                 log("  Report updated\n")
 
             if first_run:

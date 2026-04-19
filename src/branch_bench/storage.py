@@ -83,13 +83,14 @@ class TestResult:
 
 
 class Store:
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, epoch_override: int | None = None) -> None:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(db_path)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(SCHEMA)
         self._migrate()
         self._conn.commit()
+        self._epoch_override = epoch_override
 
     def _migrate(self) -> None:
         migrations = [
@@ -171,8 +172,16 @@ class Store:
     # ── Epoch ─────────────────────────────────────────────────────────────────
 
     def current_epoch(self) -> int:
+        if self._epoch_override is not None:
+            return self._epoch_override
         row = self._conn.execute("SELECT value FROM settings WHERE key='epoch'").fetchone()
         return int(row[0]) if row else 1
+
+    def all_epochs(self) -> list[int]:
+        rows = self._conn.execute(
+            "SELECT DISTINCT epoch FROM commits ORDER BY epoch"
+        ).fetchall()
+        return [r[0] for r in rows if r[0] > 0]
 
     def new_epoch(self) -> int:
         epoch = self.current_epoch() + 1
@@ -390,6 +399,50 @@ class Store:
             (run_id,),
         ).fetchall()
         return [{"event": r[0], "file_path": r[1]} for r in rows]
+
+    def profiles_for_migration(self, run_id: int) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT id, event, file_path FROM profiles WHERE run_id=?",
+            (run_id,),
+        ).fetchall()
+        return [{"id": r[0], "event": r[1], "file_path": r[2]} for r in rows]
+
+    def run_number_for_id(self, run_id: int) -> int:
+        """Return the 1-based position of run_id among all runs for its commit in its epoch."""
+        row = self._conn.execute(
+            "SELECT commit_sha, epoch FROM runs WHERE id=?", (run_id,)
+        ).fetchone()
+        if not row:
+            return 1
+        commit_sha, epoch = row
+        siblings = self._conn.execute(
+            "SELECT id FROM runs WHERE commit_sha=? AND epoch=? ORDER BY run_at ASC",
+            (commit_sha, epoch),
+        ).fetchall()
+        for i, (rid,) in enumerate(siblings):
+            if rid == run_id:
+                return i + 1
+        return 1
+
+    def all_runs_with_metadata(self) -> list[dict]:
+        """Return every run (all epochs) with commit info — used by migrate command."""
+        rows = self._conn.execute(
+            "SELECT r.id, r.epoch, r.commit_sha, r.jmh_json_path, c.short_sha, c.message "
+            "FROM runs r JOIN commits c ON r.commit_sha = c.sha "
+            "ORDER BY r.epoch, r.commit_sha, r.run_at ASC"
+        ).fetchall()
+        return [
+            dict(zip(["id", "epoch", "commit_sha", "jmh_json_path", "short_sha", "message"], r))
+            for r in rows
+        ]
+
+    def update_profile_path(self, profile_id: int, new_path: str) -> None:
+        self._conn.execute("UPDATE profiles SET file_path=? WHERE id=?", (new_path, profile_id))
+        self._conn.commit()
+
+    def update_jmh_json_path(self, run_id: int, new_path: str) -> None:
+        self._conn.execute("UPDATE runs SET jmh_json_path=? WHERE id=?", (new_path, run_id))
+        self._conn.commit()
 
     def all_benchmark_names(self) -> list[str]:
         epoch = self.current_epoch()

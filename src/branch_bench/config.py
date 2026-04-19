@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,14 +16,19 @@ class RepoConfig:
 class CommandsConfig:
     test_cmd: str = ""
     # {out} is substituted with a temp path for JMH JSON output
+    # {out_dir} is substituted with a temp dir for profiler output (SVGs)
     bench_cmd: str = ""
 
 
 @dataclass
 class OutputConfig:
-    db: str = ".branchbench/bench-results.db"
-    report: str = ".branchbench/report.html"
-    profiles_dir: str = ".branchbench/profiles"
+    dir: str = ".bench"
+
+
+def commit_slug(short_sha: str, message: str) -> str:
+    """Return a filesystem-safe slug: '{short_sha}-{sanitized-message}'."""
+    msg = re.sub(r"[^a-z0-9]+", "-", message.lower()).strip("-")[:40].rstrip("-")
+    return f"{short_sha}-{msg}"
 
 
 @dataclass
@@ -31,12 +37,29 @@ class Config:
     commands: CommandsConfig = field(default_factory=CommandsConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
 
+    def base_dir(self) -> Path:
+        return Path(self.output.dir)
+
+    def db_path(self) -> Path:
+        return self.base_dir() / "bench.db"
+
+    def index_path(self) -> Path:
+        return self.base_dir() / "index.html"
+
+    def epoch_dir(self, epoch: int) -> Path:
+        return self.base_dir() / f"epoch-{epoch}"
+
+    def report_path(self, epoch: int) -> Path:
+        return self.epoch_dir(epoch) / "report.html"
+
+    def run_assets_dir(self, epoch: int, short_sha: str, message: str, run_number: int) -> Path:
+        return self.epoch_dir(epoch) / "assets" / commit_slug(short_sha, message) / f"run-{run_number}"
+
 
 def _toml_error(path: Path, e: Exception) -> str:
-    import re
+    import re as _re
     msg = e.args[0] if e.args else str(e)
-    # CPython embeds position as "(at line N, column M)" in the message
-    m = re.search(r"\(at line (\d+), column (\d+)\)", msg)
+    m = _re.search(r"\(at line (\d+), column (\d+)\)", msg)
     if m:
         lineno, col = int(m.group(1)), int(m.group(2))
         try:
@@ -81,13 +104,11 @@ test_cmd = ""
 # Two substitutions are available:
 #   {out}     — temp file path for JMH JSON results        (-rff {out})
 #   {out_dir} — temp directory path for profiler output    (dir={out_dir})
-# Any *.svg files written into {out_dir} are automatically collected as flamegraphs.
+# Any *.svg / *.html files written into {out_dir} are collected as flamegraphs.
 # Example (Mill + async-profiler):
 #   bench_cmd = "./mill foo.jmh.run -- -rff {out} -prof async:libPath=/path/to/libasyncProfiler.dylib;dir={out_dir} -wi 5 -i 5 -f1"
 bench_cmd = ""
 
 [output]
-db = ".branchbench/bench-results.db"
-report = ".branchbench/report.html"
-profiles_dir = ".branchbench/profiles"
+dir = ".bench"
 """

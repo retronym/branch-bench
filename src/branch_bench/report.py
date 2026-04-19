@@ -8,6 +8,53 @@ from pathlib import Path
 from .storage import Store
 
 
+def generate_index(cfg) -> None:
+    """Generate .bench/index.html listing all epoch report directories."""
+    base = cfg.base_dir()
+    epoch_dirs = sorted(
+        (p for p in base.iterdir() if p.is_dir() and p.name.startswith("epoch-")),
+        key=lambda p: int(p.name.split("-", 1)[1]),
+    ) if base.exists() else []
+
+    rows = ""
+    for ep_dir in epoch_dirs:
+        report = ep_dir / "report.html"
+        if not report.exists():
+            continue
+        num = ep_dir.name.split("-", 1)[1]
+        mtime = datetime.fromtimestamp(report.stat().st_mtime, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+        rows += f'<tr><td><a href="{html.escape(ep_dir.name)}/report.html">Epoch {html.escape(num)}</a></td><td>{mtime}</td></tr>\n'
+
+    content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>branch-bench</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; margin: 2rem; background: #0d1117; color: #e6edf3; }}
+  h1 {{ font-size: 1.1rem; margin-bottom: 1.5rem; }}
+  table {{ border-collapse: collapse; font-size: 0.9rem; }}
+  th, td {{ text-align: left; padding: 0.4rem 1.2rem 0.4rem 0; border-bottom: 1px solid #21262d; }}
+  th {{ color: #8b949e; font-weight: 600; }}
+  a {{ color: #58a6ff; text-decoration: none; }}
+  a:hover {{ text-decoration: underline; }}
+</style>
+</head>
+<body>
+<h1>branch-bench reports</h1>
+<table>
+<thead><tr><th>Epoch</th><th>Last updated</th></tr></thead>
+<tbody>
+{rows or '<tr><td colspan="2" style="color:#484f58">No reports yet.</td></tr>'}
+</tbody>
+</table>
+</body>
+</html>
+"""
+    base.mkdir(parents=True, exist_ok=True)
+    cfg.index_path().write_text(content, encoding="utf-8")
+
+
 def _ts(unix: int) -> str:
     return datetime.fromtimestamp(unix, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
 
