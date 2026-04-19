@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import subprocess
 import tempfile
@@ -91,11 +92,28 @@ def parse_jmh_json(path: Path) -> list[BenchmarkResult]:
 
         secondary: list[SecondaryMetric] = []
         for name, sm in (entry.get("secondaryMetrics") or {}).items():
+            # Skip non-numeric metrics (e.g. -prof stack produces text stack traces
+            # with score "NaN" and string rawData).
+            try:
+                score_val = float(sm.get("score", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if math.isnan(score_val):
+                continue
+
             sm_nested = sm.get("rawData") or []
-            sm_raw = [v for fork in sm_nested for v in fork] or None
+            sm_raw_flat = [v for fork in sm_nested for v in fork]
+            # Only keep raw data when it is numeric (stack profiler sends strings).
+            sm_raw: list | None = None
+            if sm_raw_flat:
+                try:
+                    sm_raw = [float(v) for v in sm_raw_flat]
+                except (TypeError, ValueError):
+                    sm_raw = None
+
             secondary.append(SecondaryMetric(
                 metric=name,
-                score=float(sm.get("score", 0)),
+                score=score_val,
                 score_error=float(sm["scoreError"]) if sm.get("scoreError") not in (None, "NaN") else None,
                 unit=sm.get("scoreUnit", ""),
                 raw_data=sm_raw,

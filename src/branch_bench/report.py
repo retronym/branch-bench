@@ -69,6 +69,18 @@ def _rebase(path_str: str, report_dir: Path) -> str:
         return path_str
 
 
+def _bench_group(name: str) -> str:
+    """Class portion of a fully-qualified JMH benchmark name (drops .methodName)."""
+    idx = name.rfind(".")
+    return name[:idx] if idx >= 0 else name
+
+
+def _bench_display(group: str) -> str:
+    """Short, human-readable label for a benchmark group (simple class name)."""
+    idx = group.rfind(".")
+    return group[idx + 1:] if idx >= 0 else group
+
+
 def generate(store: Store, output_path: Path, github_url: str | None = None) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     report_dir = output_path.parent
@@ -169,6 +181,15 @@ def generate(store: Store, output_path: Path, github_url: str | None = None) -> 
     github_url_json = json.dumps(github_url or "")
     secondary_metric_names_json = json.dumps(store.all_secondary_metric_names())
 
+    # Benchmark groups: ordered list of unique class names inferred from JMH benchmark names.
+    seen_groups: dict[str, None] = {}
+    for name in benchmark_names:
+        seen_groups[_bench_group(name)] = None
+    bench_groups_json = json.dumps([
+        {"group": g, "display": _bench_display(g)}
+        for g in seen_groups
+    ])
+
     current_epoch = store.current_epoch()
     all_epochs = store.all_epochs()
     # Relative paths from epoch-N/report.html to epoch-M/report.html
@@ -208,6 +229,7 @@ def generate(store: Store, output_path: Path, github_url: str | None = None) -> 
   .score {{ font-family: monospace; font-size: 0.82rem; white-space: nowrap; }}
   .score-err {{ color: #8b949e; font-size: 0.75rem; }}
   .score-unit {{ color: #8b949e; font-size: 0.75rem; margin-left: 0.2rem; }}
+  .bench-score-label {{ color: #484f58; font-size: 0.7rem; font-family: monospace; }}
   .toggle {{ font-size: 0.7rem; color: #388bfd; margin-left: 0.5rem; cursor: pointer; }}
   .copy-sha {{
     background: none; border: none; cursor: pointer; padding: 0 0.15rem;
@@ -264,11 +286,12 @@ def generate(store: Store, output_path: Path, github_url: str | None = None) -> 
   /* ── Top nav ── */
   .topnav {{
     display: flex; align-items: center; justify-content: space-between;
-    padding: 0 1.25rem; height: 2.6rem;
+    padding: 0 1.25rem; min-height: 2.6rem;
     background: #010409; border-bottom: 1px solid #21262d;
     font-size: 0.78rem; position: sticky; top: 0; z-index: 10;
+    flex-wrap: wrap; gap: 0.4rem 0;
   }}
-  .nav-left {{ display: flex; align-items: center; gap: 0.6rem; }}
+  .nav-left {{ display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; padding: 0.4rem 0; }}
   .nav-brand {{
     font-weight: 700; font-size: 0.82rem; letter-spacing: -0.01em;
     color: #e6edf3; font-family: monospace;
@@ -305,7 +328,16 @@ def generate(store: Store, output_path: Path, github_url: str | None = None) -> 
   .epoch-list li a:hover {{ background: #21262d; color: #e6edf3; }}
   .epoch-list li.current a {{ color: #58a6ff; font-weight: 600; }}
   .epoch-list li.hidden {{ display: none; }}
-  .nav-right {{ display: flex; align-items: center; }}
+  .nav-right {{ display: flex; align-items: center; padding: 0.4rem 0; }}
+  /* ── Benchmark group picker ── */
+  .bench-picker {{ display: flex; align-items: center; gap: 0.3rem; flex-wrap: wrap; }}
+  .bench-btn {{
+    background: none; border: 1px solid #30363d; color: #8b949e;
+    border-radius: 4px; padding: 0.15rem 0.5rem; font-size: 0.72rem;
+    cursor: pointer; white-space: nowrap; font-family: monospace;
+  }}
+  .bench-btn:hover {{ border-color: #8b949e; color: #e6edf3; }}
+  .bench-btn.active {{ background: #388bfd22; border-color: #388bfd; color: #e6edf3; }}
   .nav-gh {{
     display: flex; align-items: center; gap: 0.4rem;
     color: #484f58; text-decoration: none; font-size: 0.72rem;
@@ -331,6 +363,8 @@ def generate(store: Store, output_path: Path, github_url: str | None = None) -> 
         <ul class="epoch-list" id="epochList"></ul>
       </div>
     </div>
+    <span class="nav-sep" id="benchSep">·</span>
+    <div class="bench-picker" id="benchPicker"></div>
   </div>
   <a class="nav-gh" href="https://github.com/retronym/branch-bench" target="_blank" rel="noopener">
     <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -389,6 +423,7 @@ const benchData = {bench_json};
 const commits = {rows_json};
 const githubUrl = {github_url_json};
 const secondaryMetricNames = {secondary_metric_names_json};
+const benchGroups = {bench_groups_json};
 
 // Populate secondary metric dropdown; hide overlay controls when no secondary metrics exist
 (function() {{
@@ -412,6 +447,54 @@ const secondaryMetricNames = {secondary_metric_names_json};
 }})();
 const currentEpoch = {current_epoch};
 const epochLinks = {epoch_links_json};
+
+// ── Benchmark group picker (multi-select) ─────────────────────────────────────
+// Empty set = no filter = all groups visible.
+const selectedBenchmarks = new Set();
+
+(function() {{
+  const picker = document.getElementById('benchPicker');
+  if (benchGroups.length <= 1) {{
+    picker.style.display = 'none';
+    document.getElementById('benchSep').style.display = 'none';
+    return;
+  }}
+  for (const bg of benchGroups) {{
+    const btn = document.createElement('button');
+    btn.className = 'bench-btn';
+    btn.dataset.group = bg.group;
+    btn.title = bg.group; // full class name on hover
+    btn.textContent = bg.display;
+    btn.onclick = () => toggleBenchmark(bg.group);
+    picker.appendChild(btn);
+    // Start with all buttons highlighted (empty selection = show all).
+    btn.classList.add('active');
+  }}
+}})();
+
+function toggleBenchmark(group) {{
+  if (selectedBenchmarks.has(group)) {{
+    selectedBenchmarks.delete(group);
+  }} else {{
+    selectedBenchmarks.add(group);
+  }}
+  _applyBenchmarkFilter();
+}}
+
+function _applyBenchmarkFilter() {{
+  const none = selectedBenchmarks.size === 0; // empty = show all
+  // Button highlight: active when selected (or when nothing selected, show all as active)
+  document.querySelectorAll('.bench-btn').forEach(b => {{
+    b.classList.toggle('active', none || selectedBenchmarks.has(b.dataset.group));
+  }});
+  // Chart cards
+  document.querySelectorAll('.chart-card').forEach(card => {{
+    const show = none || selectedBenchmarks.has(card.dataset.benchGroup);
+    card.style.display = show ? '' : 'none';
+  }});
+  // Table score cells
+  scoreUpdaters.forEach(fn => fn());
+}}
 
 // ── Epoch picker ──────────────────────────────────────────────────────────────
 (function() {{
@@ -659,6 +742,8 @@ const chartsDiv = document.getElementById('charts');
 for (const [name, bd] of Object.entries(benchData)) {{
   const card = document.createElement('div');
   card.className = 'chart-card';
+  // Tag the card with its benchmark group so the picker can show/hide it.
+  card.dataset.benchGroup = name.substring(0, name.lastIndexOf('.')) || name;
   const title = document.createElement('p');
   title.className = 'chart-title';
   title.textContent = name;
@@ -715,6 +800,11 @@ function setSecondaryMetric(val) {{
 // ── Score cell rendering (runs-mode aware) ────────────────────────────────────
 const scoreUpdaters = [];
 
+function benchGroupOf(name) {{
+  const idx = name.lastIndexOf('.');
+  return idx >= 0 ? name.substring(0, idx) : name;
+}}
+
 function renderScoreCell(td, c) {{
   let scores;
   if (runsMode === 'all' || runsMode === 'latest') {{
@@ -739,16 +829,28 @@ function renderScoreCell(td, c) {{
     scores = [];
   }}
 
+  // Filter to the selected benchmark group(s).
+  if (selectedBenchmarks.size > 0 && scores) {{
+    scores = scores.filter(s => selectedBenchmarks.has(benchGroupOf(s.benchmark)));
+  }}
+
   if (!scores || scores.length === 0) {{
     td.innerHTML = '<span class="na">—</span>';
     return;
   }}
+  // Show a method-name label when more than one benchmark is visible, so it's
+  // clear which score belongs to which class.
+  const multiGroup = benchGroups.length > 1 && selectedBenchmarks.size !== 1;
   td.innerHTML = scores.map(s => {{
     const scoreStr = s.score.toPrecision(6);
     const err = s.score_error != null
       ? ` <span class="score-err">± ${{s.score_error.toPrecision(3)}}</span>` : '';
     const unit = `<span class="score-unit">${{esc(s.unit)}}</span>`;
-    return `<div class="score" title="${{esc(s.benchmark)}}">${{scoreStr}}${{err}} ${{unit}}</div>`;
+    const methodName = s.benchmark.substring(s.benchmark.lastIndexOf('.') + 1);
+    const label = multiGroup
+      ? `<span class="bench-score-label">${{esc(methodName)}}</span> `
+      : '';
+    return `<div class="score" title="${{esc(s.benchmark)}}">${{label}}${{scoreStr}}${{err}} ${{unit}}</div>`;
   }}).join('');
 }}
 
@@ -869,11 +971,36 @@ for (const c of commits) {{
         ${{benchOutputBlock}}
       </td>
       <td>${{testStatus}}</td>
-      <td>${{r.bench_count > 0 ? r.bench_count + ' result(s)' : '<span class="na">—</span>'}}</td>
+      <td></td>
       <td>${{[profileLinks, jmhLink].filter(Boolean).join(' ')}}</td>
     `;
     tbody.appendChild(tr);
     runRows.push(tr);
+
+    // Run-row bench cell: dynamic so it respects the benchmark group filter.
+    const runBenchTd = tr.cells[2];
+    function renderRunBenchCell() {{
+      let scores = r.scores;
+      if (selectedBenchmarks.size > 0) {{
+        scores = scores.filter(s => selectedBenchmarks.has(benchGroupOf(s.benchmark)));
+      }}
+      if (!scores || scores.length === 0) {{
+        runBenchTd.innerHTML = '<span class="na">—</span>';
+        return;
+      }}
+      const multiGroup = benchGroups.length > 1 && selectedBenchmarks.size !== 1;
+      runBenchTd.innerHTML = scores.map(s => {{
+        const scoreStr = s.score.toPrecision(5);
+        const methodName = s.benchmark.substring(s.benchmark.lastIndexOf('.') + 1);
+        const label = multiGroup
+          ? `<span class="bench-score-label">${{esc(methodName)}}</span> `
+          : '';
+        const unit = `<span class="score-unit">${{esc(s.unit)}}</span>`;
+        return `<div class="score" title="${{esc(s.benchmark)}}">${{label}}${{scoreStr}} ${{unit}}</div>`;
+      }}).join('');
+    }}
+    renderRunBenchCell();
+    scoreUpdaters.push(renderRunBenchCell);
   }}
 
   function setExpanded(expanded) {{

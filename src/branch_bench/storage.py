@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -328,9 +329,12 @@ class Store:
             "SELECT ?, event, file_path FROM profiles WHERE run_id=?",
             (new_run_id, source_run_id),
         )
+        # Exclude rows where score is NULL (e.g. NaN that was stored as NULL by older
+        # Python versions before the isfinite guard was added).
         self._conn.execute(
             "INSERT INTO secondary_metrics(run_id, benchmark, metric, score, score_error, unit, raw_data) "
-            "SELECT ?, benchmark, metric, score, score_error, unit, raw_data FROM secondary_metrics WHERE run_id=?",
+            "SELECT ?, benchmark, metric, score, score_error, unit, raw_data "
+            "FROM secondary_metrics WHERE run_id=? AND score IS NOT NULL",
             (new_run_id, source_run_id),
         )
         self._conn.commit()
@@ -383,6 +387,8 @@ class Store:
                 for r in results
             ],
         )
+        # Python 3.14 sqlite3 converts float('nan') → SQL NULL, which violates NOT NULL.
+        # Filter out any secondary metric whose score is None / NaN / ±inf.
         sec_rows = [
             (
                 run_id, r.benchmark, sm.metric, sm.score, sm.score_error, sm.unit,
@@ -390,6 +396,7 @@ class Store:
             )
             for r in results
             for sm in (r.secondary_metrics or [])
+            if sm.score is not None and math.isfinite(sm.score)
         ]
         if sec_rows:
             self._conn.executemany(
@@ -500,7 +507,7 @@ class Store:
     def secondary_metrics_for(self, run_id: int) -> list[dict]:
         rows = self._conn.execute(
             "SELECT benchmark, metric, score, score_error, unit, raw_data "
-            "FROM secondary_metrics WHERE run_id=?",
+            "FROM secondary_metrics WHERE run_id=? AND score IS NOT NULL",
             (run_id,),
         ).fetchall()
         results = []
