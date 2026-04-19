@@ -76,7 +76,7 @@ def generate(store: Store, output_path: Path, github_url: str | None = None) -> 
     benchmark_names = store.all_benchmark_names()
 
     bench_data: dict[str, dict] = {
-        name: {"unit": "", "mode": "", "points": []} for name in benchmark_names
+        name: {"unit": "", "mode": "", "points": [], "secUnits": {}} for name in benchmark_names
     }
 
     commit_rows = []
@@ -90,11 +90,26 @@ def generate(store: Store, output_path: Path, github_url: str | None = None) -> 
             bench_results = store.benchmark_results_for(run_id)
             profiles = store.profiles_for(run_id)
 
+            secondary_metrics = store.secondary_metrics_for(run_id)
+            # group by benchmark for easy lookup
+            sec_by_bench: dict[str, dict] = {}
+            for sm in secondary_metrics:
+                sec_by_bench.setdefault(sm["benchmark"], {})[sm["metric"]] = sm
+
             for r in bench_results:
                 bd = bench_data.get(r["benchmark"])
                 if bd is not None:
                     bd["unit"] = r["unit"]
                     bd["mode"] = r["mode"]
+                    # build secondary snapshot for this point
+                    sec_snap: dict = {}
+                    for metric, sm in sec_by_bench.get(r["benchmark"], {}).items():
+                        bd["secUnits"][metric] = sm["unit"]
+                        sec_snap[metric] = {
+                            "y": sm["score"],
+                            "error": sm["score_error"] if sm["score_error"] is not None else 0,
+                            "raw": sm["raw_data"],
+                        }
                     bd["points"].append({
                         "x": f"{commit['message'][:40]}",
                         "y": r["score"],
@@ -105,6 +120,7 @@ def generate(store: Store, output_path: Path, github_url: str | None = None) -> 
                         "short_sha": commit["short_sha"],
                         "run_index": run_index,
                         "sha": commit["sha"],
+                        "sec": sec_snap,
                     })
 
             commit_run_rows.append({
@@ -151,6 +167,7 @@ def generate(store: Store, output_path: Path, github_url: str | None = None) -> 
     bench_json = json.dumps(bench_data)
     rows_json = json.dumps(commit_rows)
     github_url_json = json.dumps(github_url or "")
+    secondary_metric_names_json = json.dumps(store.all_secondary_metric_names())
 
     current_epoch = store.current_epoch()
     all_epochs = store.all_epochs()
@@ -217,11 +234,11 @@ def generate(store: Store, output_path: Path, github_url: str | None = None) -> 
   }}
   .mode-btn.active {{ background: #388bfd22; border-color: #388bfd; color: #e6edf3; }}
   .mode-btn:hover {{ border-color: #8b949e; }}
-  #runs-mode {{
+  #runs-mode, #secondary-mode {{
     background: #21262d; border: 1px solid #30363d; color: #e6edf3;
     border-radius: 4px; padding: 0.2rem 0.5rem; font-size: 0.72rem; cursor: pointer;
   }}
-  #runs-mode:focus {{ outline: none; border-color: #388bfd; }}
+  #runs-mode:focus, #secondary-mode:focus {{ outline: none; border-color: #388bfd; }}
   #toast {{
     position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%);
     background: #388bfd; color: #fff; padding: 0.4rem 1rem; border-radius: 6px;
@@ -339,6 +356,11 @@ def generate(store: Store, output_path: Path, github_url: str | None = None) -> 
     <option value="aggregate">Aggregate</option>
   </select>
   <span class="mode-sep">│</span>
+  <span class="mode-label">overlay:</span>
+  <select id="secondary-mode" onchange="setSecondaryMetric(this.value)">
+    <option value="">none</option>
+  </select>
+  <span class="mode-sep">│</span>
   <span class="mode-label">error bars:</span>
   <button class="mode-btn active" data-mode="mean" onclick="setChartMode('mean')" >mean ± CI</button>
   <button class="mode-btn"        data-mode="min"  onclick="setChartMode('min')"  >min</button>
@@ -366,6 +388,28 @@ def generate(store: Store, output_path: Path, github_url: str | None = None) -> 
 const benchData = {bench_json};
 const commits = {rows_json};
 const githubUrl = {github_url_json};
+const secondaryMetricNames = {secondary_metric_names_json};
+
+// Populate secondary metric dropdown; hide overlay controls when no secondary metrics exist
+(function() {{
+  const sel = document.getElementById('secondary-mode');
+  for (const name of secondaryMetricNames) {{
+    const opt = document.createElement('option');
+    opt.value = name; opt.textContent = name;
+    sel.appendChild(opt);
+  }}
+  if (secondaryMetricNames.length === 0) {{
+    // Hide: preceding sep, preceding label, the select itself, and the following sep
+    const nodes = [];
+    let el = sel.previousElementSibling;
+    if (el && el.classList.contains('mode-sep')) {{ nodes.push(el); el = el.previousElementSibling; }}
+    if (el && el.classList.contains('mode-label')) nodes.push(el);
+    const next = sel.nextElementSibling;
+    if (next && next.classList.contains('mode-sep')) nodes.push(next);
+    nodes.push(sel);
+    nodes.forEach(n => n.style.display = 'none');
+  }}
+}})();
 const currentEpoch = {current_epoch};
 const epochLinks = {epoch_links_json};
 
@@ -446,20 +490,33 @@ function pooledStats(rawArrays) {{
 // ── Charts ────────────────────────────────────────────────────────────────────
 let chartMode = 'mean'; // 'mean' | 'min' | 'max' | 'raw'
 let runsMode  = 'latest'; // 'latest' | 'all' | 'aggregate' | 'run_N'
-const chartRenderers = []; // functions(errMode, runsMode)
+let secondaryMetric = ''; // '' | metric name
+const chartRenderers = []; // functions(errMode, runsMode, secMetric)
 
 const palette = ['#388bfd','#3fb950','#d29922','#f85149','#bc8cff','#39d353'];
+const secColor = '#f0883e'; // distinct warm colour for secondary axis
 const categoryArray = commits.map(c => c.message.substring(0, 40));
-const layout = (unit, mode_label) => ({{
-  paper_bgcolor: '#161b22', plot_bgcolor: '#161b22',
-  font: {{ color: '#e6edf3', size: 11 }},
-  margin: {{ t: 10, r: 20, b: 220, l: 70 }},
-  xaxis: {{ tickangle: -55, gridcolor: '#21262d', color: '#8b949e', automargin: true,
-            categoryorder: 'array', categoryarray: categoryArray }},
-  yaxis: {{ title: unit + ' (' + mode_label + ')', gridcolor: '#21262d', color: '#8b949e', rangemode: 'tozero' }},
-  legend: {{ bgcolor: 'transparent', font: {{ size: 10 }} }},
-  height: 520,
-}});
+const layout = (unit, mode_label, secUnit) => {{
+  const hasSecondary = !!secUnit;
+  return {{
+    paper_bgcolor: '#161b22', plot_bgcolor: '#161b22',
+    font: {{ color: '#e6edf3', size: 11 }},
+    margin: {{ t: 10, r: hasSecondary ? 80 : 20, b: 220, l: 70 }},
+    xaxis: {{ tickangle: -55, gridcolor: '#21262d', color: '#8b949e', automargin: true,
+              categoryorder: 'array', categoryarray: categoryArray }},
+    yaxis: {{ title: unit + ' (' + mode_label + ')', gridcolor: '#21262d', color: '#8b949e', rangemode: 'tozero' }},
+    ...(hasSecondary ? {{
+      yaxis2: {{
+        title: secUnit,
+        overlaying: 'y', side: 'right',
+        color: secColor, gridcolor: 'transparent',
+        rangemode: 'tozero', showgrid: false,
+      }},
+    }} : {{}}),
+    legend: {{ bgcolor: 'transparent', font: {{ size: 10 }} }},
+    height: 520,
+  }};
+}};
 
 const xOrder = new Map(categoryArray.map((x, i) => [x, i]));
 function byCommitOrder(pts) {{
@@ -497,18 +554,26 @@ function resolveRunGroups(bd, rMode) {{
     const aggPts = Object.values(bySha).map(pts => {{
       const stats = pooledStats(pts.map(p => p.raw || []));
       const ref = pts[pts.length - 1];
+      // aggregate secondary metrics per metric name
+      const secAgg = {{}};
+      const secKeys = new Set(pts.flatMap(p => Object.keys(p.sec || {{}})));
+      for (const k of secKeys) {{
+        const secStats = pooledStats(pts.map(p => (p.sec?.[k]?.raw) || []));
+        if (secStats) secAgg[k] = {{ ...ref.sec?.[k], y: secStats.mean, error: secStats.ci, raw: secStats.raw }};
+        else secAgg[k] = ref.sec?.[k];
+      }}
       if (stats) {{
-        return {{ ...ref, y: stats.mean, error: stats.ci, raw: stats.raw }};
+        return {{ ...ref, y: stats.mean, error: stats.ci, raw: stats.raw, sec: secAgg }};
       }}
       const mean = pts.reduce((a, p) => a + p.y, 0) / pts.length;
-      return {{ ...ref, y: mean, error: ref.error, raw: null }};
+      return {{ ...ref, y: mean, error: ref.error, raw: null, sec: secAgg }};
     }});
     return [{{ label: 'aggregate', pts: byCommitOrder(aggPts) }}];
   }}
   return [{{ label: 'all', pts: byCommitOrder(bd.points) }}];
 }}
 
-function buildTraces(bd, errMode, rMode) {{
+function buildTraces(bd, errMode, rMode, secMetric) {{
   const groups = resolveRunGroups(bd, rMode);
   const traces = [];
   groups.forEach(({{ label, pts }}, gi) => {{
@@ -567,6 +632,25 @@ function buildTraces(bd, errMode, rMode) {{
       line: {{ color, dash: gi === 0 ? 'solid' : 'dot' }},
       hovertemplate: hoverTmpl,
     }});
+
+    // Secondary metric overlay (only on first group to avoid duplication in 'all' mode)
+    if (gi === 0 && secMetric) {{
+      const secPts = pts.filter(p => p.sec?.[secMetric] != null);
+      if (secPts.length) {{
+        const sd = secPts.map(p => p.sec[secMetric]);
+        traces.push({{
+          name: secMetric,
+          x: secPts.map(p => p.x),
+          y: sd.map(s => s.y),
+          error_y: {{ type: 'data', array: sd.map(s => s.error || 0), visible: true, color: secColor + '88' }},
+          type: 'scatter', mode: 'lines+markers',
+          marker: {{ color: secColor, size: 5, symbol: 'diamond' }},
+          line: {{ color: secColor, dash: 'dot', width: 1.5 }},
+          yaxis: 'y2',
+          hovertemplate: '%{{x}}<br>%{{y:.4g}} ' + (bd.secUnits?.[secMetric] || '') + '<extra>' + secMetric + '</extra>',
+        }});
+      }}
+    }}
   }});
   return traces;
 }}
@@ -583,8 +667,9 @@ for (const [name, bd] of Object.entries(benchData)) {{
   card.appendChild(plotDiv);
   chartsDiv.appendChild(card);
 
-  const render = (eMode, rMode) => {{
-    Plotly.react(plotDiv, buildTraces(bd, eMode, rMode), layout(bd.unit, bd.mode), {{responsive: true}});
+  const render = (eMode, rMode, secM) => {{
+    const secUnit = secM ? (bd.secUnits?.[secM] || secM) : null;
+    Plotly.react(plotDiv, buildTraces(bd, eMode, rMode, secM), layout(bd.unit, bd.mode, secUnit), {{responsive: true}});
     plotDiv.removeAllListeners?.('plotly_click');
     plotDiv.on('plotly_click', data => {{
       const pt = data.points[0];
@@ -594,7 +679,7 @@ for (const [name, bd] of Object.entries(benchData)) {{
     }});
   }};
   chartRenderers.push(render);
-  render(chartMode, runsMode);
+  render(chartMode, runsMode, secondaryMetric);
 }}
 
 // Populate "Run N" options in the dropdown
@@ -613,13 +698,18 @@ function setChartMode(mode) {{
   chartMode = mode;
   document.querySelectorAll('.mode-btn').forEach(b =>
     b.classList.toggle('active', b.dataset.mode === mode));
-  chartRenderers.forEach(r => r(mode, runsMode));
+  chartRenderers.forEach(r => r(mode, runsMode, secondaryMetric));
 }}
 
 function setRunsMode(val) {{
   runsMode = val;
-  chartRenderers.forEach(r => r(chartMode, runsMode));
+  chartRenderers.forEach(r => r(chartMode, val, secondaryMetric));
   scoreUpdaters.forEach(fn => fn());
+}}
+
+function setSecondaryMetric(val) {{
+  secondaryMetric = val;
+  chartRenderers.forEach(r => r(chartMode, runsMode, val));
 }}
 
 // ── Score cell rendering (runs-mode aware) ────────────────────────────────────

@@ -7,7 +7,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from .storage import BenchmarkResult, TestResult
+from .storage import BenchmarkResult, SecondaryMetric, TestResult
 
 
 def run_test(cmd: str, cwd: Path) -> TestResult:
@@ -88,6 +88,19 @@ def parse_jmh_json(path: Path) -> list[BenchmarkResult]:
         params = entry.get("params") or None
         nested = metric.get("rawData") or []
         flat_raw = [v for fork in nested for v in fork] or None
+
+        secondary: list[SecondaryMetric] = []
+        for name, sm in (entry.get("secondaryMetrics") or {}).items():
+            sm_nested = sm.get("rawData") or []
+            sm_raw = [v for fork in sm_nested for v in fork] or None
+            secondary.append(SecondaryMetric(
+                metric=name,
+                score=float(sm.get("score", 0)),
+                score_error=float(sm["scoreError"]) if sm.get("scoreError") not in (None, "NaN") else None,
+                unit=sm.get("scoreUnit", ""),
+                raw_data=sm_raw,
+            ))
+
         results.append(
             BenchmarkResult(
                 benchmark=entry["benchmark"],
@@ -97,6 +110,7 @@ def parse_jmh_json(path: Path) -> list[BenchmarkResult]:
                 unit=metric.get("scoreUnit", ""),
                 params=params,
                 raw_data=flat_raw,
+                secondary_metrics=secondary or None,
             )
         )
     return results

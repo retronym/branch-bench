@@ -59,7 +59,27 @@ CREATE TABLE IF NOT EXISTS profiles (
     event     TEXT NOT NULL,
     file_path TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS secondary_metrics (
+    id          INTEGER PRIMARY KEY,
+    run_id      INTEGER NOT NULL REFERENCES runs(id),
+    benchmark   TEXT NOT NULL,
+    metric      TEXT NOT NULL,
+    score       REAL NOT NULL,
+    score_error REAL,
+    unit        TEXT NOT NULL,
+    raw_data    TEXT
+);
 """
+
+
+@dataclass
+class SecondaryMetric:
+    metric: str              # e.g. "·gc.alloc.rate.norm"
+    score: float
+    score_error: float | None
+    unit: str
+    raw_data: list[float] | None = None
 
 
 @dataclass
@@ -71,6 +91,7 @@ class BenchmarkResult:
     unit: str
     params: dict | None = None
     raw_data: list[float] | None = None  # flattened fork×iteration measurements
+    secondary_metrics: list[SecondaryMetric] | None = None
 
 
 @dataclass
@@ -307,6 +328,11 @@ class Store:
             "SELECT ?, event, file_path FROM profiles WHERE run_id=?",
             (new_run_id, source_run_id),
         )
+        self._conn.execute(
+            "INSERT INTO secondary_metrics(run_id, benchmark, metric, score, score_error, unit, raw_data) "
+            "SELECT ?, benchmark, metric, score, score_error, unit, raw_data FROM secondary_metrics WHERE run_id=?",
+            (new_run_id, source_run_id),
+        )
         self._conn.commit()
         return new_run_id
 
@@ -346,18 +372,30 @@ class Store:
         self._conn.commit()
 
     def save_benchmark_results(self, run_id: int, results: list[BenchmarkResult]) -> None:
-        rows = [
-            (
-                run_id, r.benchmark, r.mode, r.score, r.score_error, r.unit,
-                json.dumps(r.params) if r.params else None,
-                json.dumps(r.raw_data) if r.raw_data else None,
-            )
-            for r in results
-        ]
         self._conn.executemany(
             "INSERT INTO benchmark_results(run_id, benchmark, mode, score, score_error, unit, params, raw_data) VALUES(?,?,?,?,?,?,?,?)",
-            rows,
+            [
+                (
+                    run_id, r.benchmark, r.mode, r.score, r.score_error, r.unit,
+                    json.dumps(r.params) if r.params else None,
+                    json.dumps(r.raw_data) if r.raw_data else None,
+                )
+                for r in results
+            ],
         )
+        sec_rows = [
+            (
+                run_id, r.benchmark, sm.metric, sm.score, sm.score_error, sm.unit,
+                json.dumps(sm.raw_data) if sm.raw_data else None,
+            )
+            for r in results
+            for sm in (r.secondary_metrics or [])
+        ]
+        if sec_rows:
+            self._conn.executemany(
+                "INSERT INTO secondary_metrics(run_id, benchmark, metric, score, score_error, unit, raw_data) VALUES(?,?,?,?,?,?,?)",
+                sec_rows,
+            )
         self._conn.commit()
 
     def save_profile(self, run_id: int, event: str, file_path: str) -> None:
@@ -458,6 +496,28 @@ class Store:
     def update_jmh_json_path(self, run_id: int, new_path: str) -> None:
         self._conn.execute("UPDATE runs SET jmh_json_path=? WHERE id=?", (new_path, run_id))
         self._conn.commit()
+
+    def secondary_metrics_for(self, run_id: int) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT benchmark, metric, score, score_error, unit, raw_data "
+            "FROM secondary_metrics WHERE run_id=?",
+            (run_id,),
+        ).fetchall()
+        results = []
+        for r in rows:
+            d = dict(zip(["benchmark", "metric", "score", "score_error", "unit", "raw_data"], r))
+            d["raw_data"] = json.loads(d["raw_data"]) if d["raw_data"] else None
+            results.append(d)
+        return results
+
+    def all_secondary_metric_names(self) -> list[str]:
+        epoch = self.current_epoch()
+        rows = self._conn.execute(
+            "SELECT DISTINCT sm.metric FROM secondary_metrics sm "
+            "JOIN runs r ON sm.run_id=r.id WHERE r.epoch=? ORDER BY sm.metric",
+            (epoch,),
+        ).fetchall()
+        return [r[0] for r in rows]
 
     def all_benchmark_names(self) -> list[str]:
         epoch = self.current_epoch()
