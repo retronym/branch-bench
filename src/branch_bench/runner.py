@@ -45,6 +45,16 @@ def bisect_order(n: int) -> list[int]:
     return result
 
 
+def _try_relative(p: Path) -> Path:
+    """Return p relative to cwd, resolving symlinks on both sides first (e.g. /tmp → /private/tmp on macOS)."""
+    if not p.is_absolute():
+        return p
+    try:
+        return p.resolve().relative_to(Path.cwd().resolve())
+    except ValueError:
+        return p
+
+
 def _infer_event(fg: Path) -> str:
     name = fg.stem.lower()
     for base in ("alloc", "wall", "lock", "cpu"):
@@ -102,7 +112,7 @@ def run_commit(
             )
             store.save_bench_output(run_id, bench_output)
             if saved_json:
-                rel = saved_json.relative_to(Path.cwd()) if saved_json.is_absolute() else saved_json
+                rel = _try_relative(saved_json)
                 store.save_jmh_json_path(run_id, str(rel))
             store.save_benchmark_results(run_id, bench_results)
             log(f"  Benchmarks: {len(bench_results)} result(s)")
@@ -111,7 +121,7 @@ def run_commit(
                 dest = run_dir / svg.name
                 shutil.move(str(svg), dest)
                 event = _infer_event(dest)
-                rel = dest.relative_to(Path.cwd()) if dest.is_absolute() else dest
+                rel = _try_relative(dest)
                 store.save_profile(run_id, event, str(rel))
                 log(f"  Profile: {dest.name}")
 
@@ -142,6 +152,7 @@ def run_branch(
 ) -> None:
     repo_path = Path(cfg.repo.path).resolve()
     cfg.base_dir().mkdir(parents=True, exist_ok=True)
+    github_url = git.github_remote_url(repo_path)
 
     if git.is_dirty(repo_path):
         log("[!] Working tree is dirty — stash or commit changes before running.")
@@ -227,7 +238,7 @@ def run_branch(
     epoch = store.current_epoch()
     report_path = cfg.report_path(epoch)
     if live_report:
-        generate(store, report_path)
+        generate(store, report_path, github_url=github_url)
         generate_index(cfg)
         log(f"Report: {report_path.resolve()}")
         log("(refresh after each commit completes)\n")
@@ -253,7 +264,7 @@ def run_branch(
                     log(f"[{pos+1}/{len(indices)}] {commit.short_sha} — tree identical to {source['short_sha']}, reusing results")
                     store.clone_run(source["run_id"], commit.sha, reused_from_sha=source["short_sha"])
                     if live_report:
-                        generate(store, report_path)
+                        generate(store, report_path, github_url=github_url)
                         generate_index(cfg)
                     if first_run:
                         first_run = False
@@ -270,7 +281,7 @@ def run_branch(
                 log=log,
             )
             if live_report:
-                generate(store, report_path)
+                generate(store, report_path, github_url=github_url)
                 generate_index(cfg)
                 log("  Report updated\n")
 

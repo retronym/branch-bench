@@ -120,9 +120,10 @@ def _do_report(cfg, epoch_override: int | None = None) -> None:
         backfilled = store.backfill_by_tree_sha()
         if backfilled:
             click.echo(f"  Backfilled {backfilled} commit(s) via tree-SHA reuse")
+        github_url = git.github_remote_url(repo_path)
         epoch = store.current_epoch()
         out = cfg.report_path(epoch)
-        generate(store, out)
+        generate(store, out, github_url=github_url)
         generate_index(cfg)
     finally:
         store.close()
@@ -257,11 +258,12 @@ def migrate(config: str, from_db: str | None) -> None:
         click.echo(f"  Copied {copied} file(s), skipped {skipped} already-migrated.")
 
         # Regenerate reports for all epochs
+        github_url = git.github_remote_url(Path(cfg.repo.path).resolve())
         for ep in store.all_epochs():
             ep_store = Store(cfg.db_path(), epoch_override=ep)
             try:
                 out = cfg.report_path(ep)
-                generate(ep_store, out)
+                generate(ep_store, out, github_url=github_url)
                 click.echo(f"  Report regenerated: {out}")
             finally:
                 ep_store.close()

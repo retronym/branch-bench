@@ -36,8 +36,11 @@ def current_ref(repo: Path) -> str:
 
 
 def find_merge_base(repo: Path, branch: str, base_branches: list[str] = ["main", "master"]) -> str | None:
-    """Return the SHA of the merge-base between branch and the first found base branch."""
+    """Return the SHA of the merge-base between branch and the first found base branch.
+    Skips self-comparison so that branch = "main" works correctly."""
     for base in base_branches:
+        if base == branch:
+            continue  # merge-base X X returns HEAD, making X..X empty
         try:
             sha = _run(["git", "merge-base", base, branch], repo)
             if sha:
@@ -65,9 +68,51 @@ def list_commits(repo: Path, branch: str, max_count: int | None = None, exclude_
     return list(reversed(commits))
 
 
+def github_remote_url(repo: Path) -> str | None:
+    """Return the base GitHub HTTPS URL for this repo (e.g. https://github.com/owner/repo),
+    inferred from the first github.com remote, preferring 'origin'.
+    Returns None if no github.com remote is found.
+    """
+    import re
+    try:
+        output = _run(["git", "remote", "-v"], repo)
+    except subprocess.CalledProcessError:
+        return None
+
+    candidates: dict[str, str] = {}  # name -> normalised url
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        name, url = parts[0], parts[1]
+        if "github.com" not in url:
+            continue
+        # Normalise SSH and HTTPS variants to https://github.com/owner/repo
+        m = re.search(r"github\.com[:/](.+?)(?:\.git)?$", url)
+        if m:
+            candidates.setdefault(name, f"https://github.com/{m.group(1)}")
+
+    return candidates.get("origin") or next(iter(candidates.values()), None)
+
+
 def checkout(repo: Path, sha: str) -> None:
     subprocess.run(["git", "checkout", "--quiet", sha], cwd=repo, check=True)
 
 
 def restore(repo: Path, ref: str) -> None:
-    subprocess.run(["git", "checkout", "--quiet", ref], cwd=repo, check=True)
+    """Checkout ref, removing any untracked files that would block the checkout."""
+    import re as _re
+    result = subprocess.run(
+        ["git", "checkout", "--quiet", ref],
+        cwd=repo, capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        return
+    # Git names the blocking files in stderr — remove them and retry once.
+    blocking = _re.findall(r"^\s+(.+)$", result.stderr, _re.MULTILINE)
+    if blocking:
+        for f in blocking:
+            (repo / f.strip()).unlink(missing_ok=True)
+        subprocess.run(["git", "checkout", "--quiet", ref], cwd=repo, check=True)
+    else:
+        raise subprocess.CalledProcessError(result.returncode, result.args, result.stderr)

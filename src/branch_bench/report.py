@@ -69,7 +69,7 @@ def _rebase(path_str: str, report_dir: Path) -> str:
         return path_str
 
 
-def generate(store: Store, output_path: Path) -> None:
+def generate(store: Store, output_path: Path, github_url: str | None = None) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     report_dir = output_path.parent
     commits = store.all_commits()
@@ -150,6 +150,7 @@ def generate(store: Store, output_path: Path) -> None:
 
     bench_json = json.dumps(bench_data)
     rows_json = json.dumps(commit_rows)
+    github_url_json = json.dumps(github_url or "")
 
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
@@ -169,7 +170,7 @@ def generate(store: Store, output_path: Path) -> None:
   table {{ width: calc(100% - 4rem); margin: 0 2rem 2rem; border-collapse: collapse; font-size: 0.82rem; }}
   th, td {{ text-align: left; padding: 0.45rem 0.75rem; border-bottom: 1px solid #21262d; vertical-align: top; }}
   th {{ background: #161b22; color: #8b949e; font-weight: 600; position: sticky; top: 0; z-index: 1; }}
-  tr.commit-row td {{ background: #0d1117; font-weight: 600; cursor: pointer; user-select: none; }}
+  tr.commit-row td {{ background: #0d1117; font-weight: 600; cursor: pointer; }}
   tr.commit-row:hover td {{ background: #161b22; }}
   tr.commit-row.pending td {{ color: #484f58; font-weight: 400; }}
   tr.run-row td {{ background: #0d1117; padding: 0.6rem 0.75rem 0.6rem 2rem; font-size: 0.78rem; }}
@@ -269,6 +270,7 @@ def generate(store: Store, output_path: Path) -> None:
 <script>
 const benchData = {bench_json};
 const commits = {rows_json};
+const githubUrl = {github_url_json};
 
 let _toastTimer;
 function showToast(msg) {{
@@ -576,8 +578,13 @@ for (const c of commits) {{
     ? '<span class="na">pending</span>'
     : `${{runCount}} run${{runCount !== 1 ? 's' : ''}} <span class="toggle">[expand]</span>`;
 
+  const shaHtml = githubUrl
+    ? `<a href="${{githubUrl}}/commit/${{esc(c.sha)}}" target="_blank" rel="noopener"
+          title="View diff on GitHub" style="font-family:monospace;font-size:0.78rem"
+          onclick="event.stopPropagation()">${{esc(c.short_sha)}}</a>`
+    : `<code style="font-size:0.78rem">${{esc(c.short_sha)}}</code>`;
   commitTr.innerHTML = `
-    <td><code style="font-size:0.78rem">${{esc(c.short_sha)}}</code></td>
+    <td>${{shaHtml}}</td>
     <td>${{esc(c.message.substring(0, 72))}}</td>
     <td style="white-space:nowrap">${{esc(c.ts)}}</td>
     <td>${{testCell}}</td>
@@ -648,6 +655,8 @@ for (const c of commits) {{
   rowBySha[c.short_sha] = setExpanded;
 
   commitTr.addEventListener('click', () => {{
+    // Don't toggle when the user is selecting text (e.g. copying the SHA)
+    if (window.getSelection()?.toString()) return;
     const expanding = runRows[0]?.classList.contains('hidden');
     setExpanded(expanding);
     const shas = expandedShas();

@@ -11,18 +11,24 @@ Results are stored in a SQLite database and never discarded. Multiple runs per c
 
 ---
 
+## Live example
+
+**[retronym.github.io/branch-bench-sample](https://retronym.github.io/branch-bench-sample/)** — a Java + Maven + JMH project benchmarking five commits of a `PropertyResolver` optimisation, including a no-op commit and an intentional regression. Source: [github.com/retronym/branch-bench-sample](https://github.com/retronym/branch-bench-sample).
+
+---
+
 ## Installation
 
 Requires Python 3.11+. Install with [pipx](https://pipx.pypa.io/) for an isolated global CLI:
 
 ```bash
-pipx install /path/to/branch-bench
+pipx install branch-bench
 ```
 
 To update after code changes:
 
 ```bash
-pipx install /path/to/branch-bench --force
+pipx install branch-bench --force
 ```
 
 ---
@@ -71,6 +77,8 @@ The `bench_cmd` is passed to `/bin/sh` via `shell=True`, so normal shell quoting
 
 ## Commands
 
+All commands accept `--config PATH` to point at a `bench.toml` in a non-default location.
+
 | Command | Description |
 |---|---|
 | `branch-bench init` | Scaffold `bench.toml` in the current directory |
@@ -93,7 +101,8 @@ The `bench_cmd` is passed to `/bin/sh` via `shell=True`, so normal shell quoting
 | `--all` | off | Re-run commits that already have results in the current epoch |
 | `--no-test` | off | Skip correctness tests |
 | `--no-bench` | off | Skip benchmarks |
-| `--no-live-report` | off | Disable per-commit report regeneration |
+| `--report` | off | Generate report after run completes (implied by `--no-live-report`) |
+| `--no-live-report` | off | Disable per-commit report regeneration during the run |
 | `--epoch N` | current | Run in a specific past epoch instead of the current one |
 
 `--sha` is the fastest way to re-run noisy commits:
@@ -104,11 +113,17 @@ branch-bench run --sha abc123 --sha def456 --all
 
 Then switch to **Aggregate** mode in the report to pool raw measurements across both runs.
 
-### `report` / `migrate` options
+### `report` options
 
-`branch-bench report --epoch N` regenerates the report for a past epoch.
+| Flag | Description |
+|---|---|
+| `--epoch N` | Regenerate the report for a specific past epoch |
 
-`branch-bench migrate --from-db OLD.db` bootstraps the new layout from an old-format database (copies the DB then migrates all file paths inside it; originals are untouched).
+### `migrate` options
+
+| Flag | Description |
+|---|---|
+| `--from-db OLD.db` | Bootstrap the new layout from an old-format database (copied to new location; originals untouched) |
 
 ---
 
@@ -174,13 +189,17 @@ Everything lives under `.bench/` (configurable via `output.dir`):
 
 **GitHub Pages:** push `.bench/` to a `gh-pages` branch. `index.html` at the root lists all epoch reports as clickable links.
 
+```bash
+tmp=$(mktemp -d) && cp -r .bench/. "$tmp" && git -C "$tmp" init -q && git -C "$tmp" add -A && git -C "$tmp" commit -q -m "Deploy report" && git -C "$tmp" push --force "$(git remote get-url origin)" HEAD:gh-pages && rm -rf "$tmp"
+```
+
 Add `.bench/` to `.gitignore` (or keep it — it has no build-tool-generated content and is fully reproducible by re-running).
 
 ### Report
 
 The HTML report loads Plotly.js via CDN and contains all data inline. It shows:
 
-**Benchmark trend charts** — one chart per benchmark variant. Hover over a point to see score, timestamp, and short SHA; click to copy the full SHA to the clipboard.
+**Benchmark trend charts** — one chart per benchmark variant. Hover over a point to see score, timestamp, and short SHA; click to copy the full SHA to the clipboard. Commit SHAs link directly to the GitHub diff when a GitHub remote is detected.
 
 The toolbar above the charts has two layers of controls:
 
@@ -196,7 +215,7 @@ The toolbar above the charts has two layers of controls:
   - *max* — upward whisker to the maximum raw measurement
   - *raw points* — box-and-whisker plot showing every individual JMH iteration
 
-**Commit table** — all commits in branch order with test pass/fail, benchmark score for the selected run mode, and links to flamegraphs and raw JMH JSON. Click a row to expand all runs with full stdout/stderr output, reused-tree badges, and per-run artifact links.
+**Commit table** — all commits in branch order with test pass/fail, benchmark score for the selected run mode, and links to flamegraphs and raw JMH JSON. Click a row to expand all runs with full stdout/stderr output, reused-tree badges, and per-run artifact links. Commit SHAs are selectable and link to GitHub diffs when a remote is detected.
 
 ---
 
@@ -220,6 +239,7 @@ Then open the report and switch **Runs → Aggregate**. This pools raw iteration
 
 `branch-bench` is build-tool agnostic. `test_cmd` and `bench_cmd` are arbitrary shell strings. It has been used with:
 
+- **Maven** + JMH: `mvn -q package -DskipTests && java -jar target/benchmarks.jar -rf json -rff {out}`
 - **Mill** + mill-jmh: `./mill foo.jmh.run -- -rf json -rff {out} ...`
 - **sbt** + sbt-jmh: `sbt "jmh:run -rf json -rff {out} ..."`
 
