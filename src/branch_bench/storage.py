@@ -214,6 +214,34 @@ class Store:
         self._conn.commit()
         return len(stale)
 
+    def refresh_positions(self, ordered_shas: list[str]) -> None:
+        """Update position for existing current-epoch commits based on their index in ordered_shas."""
+        epoch = self.current_epoch()
+        for i, sha in enumerate(ordered_shas):
+            self._conn.execute(
+                "UPDATE commits SET position=? WHERE sha=? AND epoch=?",
+                (i, sha, epoch),
+            )
+        self._conn.commit()
+
+    def backfill_by_tree_sha(self) -> int:
+        """Clone runs for epoch commits that have no runs but share a tree_sha with one that does.
+        Returns the number of commits backfilled."""
+        epoch = self.current_epoch()
+        no_run = self._conn.execute(
+            "SELECT sha, tree_sha, short_sha FROM commits "
+            "WHERE epoch=? AND tree_sha IS NOT NULL "
+            "AND sha NOT IN (SELECT DISTINCT commit_sha FROM runs WHERE epoch=?)",
+            (epoch, epoch),
+        ).fetchall()
+        count = 0
+        for sha, tree_sha, short_sha in no_run:
+            source = self.find_run_by_tree_sha(tree_sha, exclude_sha=sha)
+            if source:
+                self.clone_run(source["run_id"], sha, reused_from_sha=source["short_sha"])
+                count += 1
+        return count
+
     def find_run_by_tree_sha(self, tree_sha: str, exclude_sha: str) -> dict | None:
         """Return the most recent run for a commit with tree_sha in this epoch, excluding exclude_sha."""
         epoch = self.current_epoch()

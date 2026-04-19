@@ -45,6 +45,7 @@ def init() -> None:
 @click.option("--commits", "-n", type=int, default=None, help="Max commits to process")
 @click.option("--from-sha", default=None, help="Start from this commit SHA")
 @click.option("--to-sha", default=None, help="Stop at this commit SHA")
+@click.option("--sha", "target_shas", multiple=True, metavar="SHA", help="Run only this commit (repeatable; prefix match)")
 @click.option(
     "--strategy",
     type=click.Choice(["bisect", "linear"]),
@@ -62,6 +63,7 @@ def run(
     commits: int | None,
     from_sha: str | None,
     to_sha: str | None,
+    target_shas: tuple[str, ...],
     strategy: str,
     no_test: bool,
     no_bench: bool,
@@ -80,6 +82,7 @@ def run(
             max_commits=commits,
             from_sha=from_sha,
             to_sha=to_sha,
+            target_shas=target_shas,
             strategy=strategy,
             run_tests=not no_test,
             run_benchmarks=not no_bench,
@@ -109,9 +112,13 @@ def _do_report(cfg) -> None:
     try:
         merge_base = git.find_merge_base(repo_path, cfg.repo.branch)
         commits = git.list_commits(repo_path, cfg.repo.branch, exclude_before=merge_base)
+        store.refresh_positions([c.sha for c in commits])
         retired = store.retire_stale_commits({c.sha for c in commits})
         if retired:
             click.echo(f"  Retired {retired} stale commit(s) no longer on branch")
+        backfilled = store.backfill_by_tree_sha()
+        if backfilled:
+            click.echo(f"  Backfilled {backfilled} commit(s) via tree-SHA reuse")
         generate(store, out)
     finally:
         store.close()

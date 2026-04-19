@@ -275,6 +275,11 @@ const layout = (unit, mode_label) => ({{
   height: 520,
 }});
 
+const xOrder = new Map(categoryArray.map((x, i) => [x, i]));
+function byCommitOrder(pts) {{
+  return [...pts].sort((a, b) => (xOrder.get(a.x) ?? Infinity) - (xOrder.get(b.x) ?? Infinity));
+}}
+
 function resolveRunGroups(bd, rMode) {{
   // Returns {{ label: string, pts: point[] }}[]
   if (rMode === 'all') {{
@@ -283,7 +288,7 @@ function resolveRunGroups(bd, rMode) {{
       (byIdx[pt.run_index] = byIdx[pt.run_index] || []).push(pt);
     }}
     return Object.entries(byIdx).map(([ri, pts]) => ({{
-      label: 'run ' + (parseInt(ri) + 1), pts,
+      label: 'run ' + (parseInt(ri) + 1), pts: byCommitOrder(pts),
     }}));
   }}
   if (rMode === 'latest') {{
@@ -292,18 +297,18 @@ function resolveRunGroups(bd, rMode) {{
       if (!latestBySha[pt.sha] || pt.run_index > latestBySha[pt.sha].run_index)
         latestBySha[pt.sha] = pt;
     }}
-    return [{{ label: 'latest', pts: Object.values(latestBySha) }}];
+    return [{{ label: 'latest', pts: byCommitOrder(Object.values(latestBySha)) }}];
   }}
   if (rMode.startsWith('run_')) {{
     const target = parseInt(rMode.slice(4));
-    return [{{ label: 'run ' + (target + 1), pts: bd.points.filter(p => p.run_index === target) }}];
+    return [{{ label: 'run ' + (target + 1), pts: byCommitOrder(bd.points.filter(p => p.run_index === target)) }}];
   }}
   if (rMode === 'aggregate') {{
     const bySha = {{}};
     for (const pt of bd.points) {{
       (bySha[pt.sha] = bySha[pt.sha] || []).push(pt);
     }}
-    const aggPts = Object.entries(bySha).map(([sha, pts]) => {{
+    const aggPts = Object.values(bySha).map(pts => {{
       const stats = pooledStats(pts.map(p => p.raw || []));
       const ref = pts[pts.length - 1];
       if (stats) {{
@@ -312,9 +317,9 @@ function resolveRunGroups(bd, rMode) {{
       const mean = pts.reduce((a, p) => a + p.y, 0) / pts.length;
       return {{ ...ref, y: mean, error: ref.error, raw: null }};
     }});
-    return [{{ label: 'aggregate', pts: aggPts }}];
+    return [{{ label: 'aggregate', pts: byCommitOrder(aggPts) }}];
   }}
-  return [{{ label: 'all', pts: bd.points }}];
+  return [{{ label: 'all', pts: byCommitOrder(bd.points) }}];
 }}
 
 function buildTraces(bd, errMode, rMode) {{

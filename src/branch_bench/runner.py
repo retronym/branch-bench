@@ -130,6 +130,7 @@ def run_branch(
     max_commits: int | None = None,
     from_sha: str | None = None,
     to_sha: str | None = None,
+    target_shas: tuple[str, ...] = (),
     strategy: str = "bisect",
     run_tests: bool = True,
     run_benchmarks: bool = True,
@@ -151,35 +152,38 @@ def run_branch(
     merge_base = git.find_merge_base(repo_path, cfg.repo.branch)
     if merge_base:
         log(f"Merge base with main/master: {merge_base[:8]} — limiting to branch-only commits")
-    commits = git.list_commits(repo_path, cfg.repo.branch, max_count=max_commits, exclude_before=merge_base)
+    all_commits = git.list_commits(repo_path, cfg.repo.branch, max_count=max_commits, exclude_before=merge_base)
 
-    def _find(sha: str) -> int | None:
-        for i, c in enumerate(commits):
+    def _find(sha: str, lst: list) -> int | None:
+        for i, c in enumerate(lst):
             if c.sha.startswith(sha) or c.short_sha.startswith(sha):
                 return i
         return None
 
+    # Determine the run range (from/to slicing) — separate from the full list
+    run_range = all_commits
     if from_sha:
-        idx = _find(from_sha)
+        idx = _find(from_sha, run_range)
         if idx is None:
             log(f"[!] --from-sha {from_sha!r} not found on branch — aborting.")
             return
-        commits = commits[idx:]
+        run_range = run_range[idx:]
     if to_sha:
-        idx = _find(to_sha)
+        idx = _find(to_sha, run_range)
         if idx is None:
             log(f"[!] --to-sha {to_sha!r} not found on branch — aborting.")
             return
-        commits = commits[: idx + 1]
+        run_range = run_range[: idx + 1]
 
-    if not commits:
+    if not run_range:
         log("No commits found.")
         return
 
-    log(f"Found {len(commits)} commit(s) on branch '{cfg.repo.branch}'")
+    log(f"Found {len(run_range)} commit(s) on branch '{cfg.repo.branch}'")
 
-    # Persist all commits up front so the placeholder report shows the full list
-    for i, commit in enumerate(commits):
+    # Persist ALL commits with absolute positions so the report order is always correct.
+    # Using all_commits (not the sliced run_range) prevents --from-sha from corrupting positions.
+    for i, commit in enumerate(all_commits):
         store.save_commit(
             sha=commit.sha,
             short_sha=commit.short_sha,
@@ -194,10 +198,30 @@ def run_branch(
     # Retire commits left over from a previous branch incarnation (e.g. after rebase).
     # Only safe when we have a complete, unfiltered view of the branch.
     if not from_sha and not to_sha and max_commits is None:
-        current_shas = {c.sha for c in commits}
+        current_shas = {c.sha for c in all_commits}
         retired = store.retire_stale_commits(current_shas)
         if retired:
             log(f"  Retired {retired} stale commit(s) no longer on branch")
+
+    backfilled = store.backfill_by_tree_sha()
+    if backfilled:
+        log(f"  Backfilled {backfilled} commit(s) via tree-SHA reuse")
+
+    # --sha: restrict the run loop to specific commits (saves/retires still use the full list)
+    run_commits = run_range
+    if target_shas:
+        seen: set[str] = set()
+        run_commits = []
+        for prefix in target_shas:
+            idx = _find(prefix, all_commits)
+            if idx is None:
+                log(f"[!] --sha {prefix!r} not found on branch — skipping.")
+            elif all_commits[idx].sha not in seen:
+                seen.add(all_commits[idx].sha)
+                run_commits.append(all_commits[idx])
+        if not run_commits:
+            log("No matching commits to run.")
+            return
 
     report_path = Path(cfg.output.report)
     if live_report:
@@ -205,12 +229,12 @@ def run_branch(
         log(f"Report: {report_path.resolve()}")
         log("(refresh after each commit completes)\n")
 
-    indices = bisect_order(len(commits)) if strategy == "bisect" else list(range(len(commits)))
+    indices = bisect_order(len(run_commits)) if strategy == "bisect" else list(range(len(run_commits)))
 
     try:
         first_run = True  # tracks the first commit we actually execute (not skip)
         for pos, idx in enumerate(indices):
-            commit = commits[idx]
+            commit = run_commits[idx]
 
             if skip_existing and store.has_runs(commit.sha, run_benchmarks=run_benchmarks, run_tests=run_tests):
                 log(f"  Skipping {commit.short_sha} (already has runs — use --all to re-run)")
