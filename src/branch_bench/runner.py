@@ -259,7 +259,11 @@ def run_branch(
                 continue
 
             if skip_existing and commit.tree_sha:
-                source = store.find_run_by_tree_sha(commit.tree_sha, exclude_sha=commit.sha)
+                source = store.find_run_by_tree_sha(
+                    commit.tree_sha, exclude_sha=commit.sha,
+                    require_bench=run_benchmarks,
+                    require_test=run_tests,
+                )
                 if source:
                     log(f"[{pos+1}/{len(indices)}] {commit.short_sha} — tree identical to {source['short_sha']}, reusing results")
                     store.clone_run(source["run_id"], commit.sha, reused_from_sha=source["short_sha"])

@@ -251,14 +251,29 @@ class Store:
                 count += 1
         return count
 
-    def find_run_by_tree_sha(self, tree_sha: str, exclude_sha: str) -> dict | None:
-        """Return the most recent run for a commit with tree_sha in this epoch, excluding exclude_sha."""
+    def find_run_by_tree_sha(
+        self, tree_sha: str, exclude_sha: str,
+        require_bench: bool = False,
+        require_test: bool = False,
+    ) -> dict | None:
+        """Return the most recent run for a commit with tree_sha in this epoch, excluding exclude_sha.
+
+        require_bench — only match runs that have at least one benchmark_result row.
+        require_test  — only match runs that have a test_run row.
+        """
         epoch = self.current_epoch()
+        bench_join = (
+            "JOIN benchmark_results br ON br.run_id = r.id " if require_bench else ""
+        )
+        test_join = (
+            "JOIN test_runs tr ON tr.run_id = r.id " if require_test else ""
+        )
         row = self._conn.execute(
-            "SELECT r.id, c.short_sha FROM runs r "
-            "JOIN commits c ON r.commit_sha = c.sha "
-            "WHERE c.tree_sha=? AND r.epoch=? AND c.sha!=? "
-            "ORDER BY r.run_at DESC LIMIT 1",
+            f"SELECT r.id, c.short_sha FROM runs r "
+            f"JOIN commits c ON r.commit_sha = c.sha "
+            f"{bench_join}{test_join}"
+            f"WHERE c.tree_sha=? AND r.epoch=? AND c.sha!=? "
+            f"ORDER BY r.run_at DESC LIMIT 1",
             (tree_sha, epoch, exclude_sha),
         ).fetchone()
         return {"run_id": row[0], "short_sha": row[1]} if row else None

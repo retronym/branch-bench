@@ -152,6 +152,14 @@ def generate(store: Store, output_path: Path, github_url: str | None = None) -> 
     rows_json = json.dumps(commit_rows)
     github_url_json = json.dumps(github_url or "")
 
+    current_epoch = store.current_epoch()
+    all_epochs = store.all_epochs()
+    # Relative paths from epoch-N/report.html to epoch-M/report.html
+    epoch_links_json = json.dumps([
+        {"epoch": ep, "path": f"../epoch-{ep}/report.html"}
+        for ep in all_epochs
+    ])
+
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -184,6 +192,13 @@ def generate(store: Store, output_path: Path, github_url: str | None = None) -> 
   .score-err {{ color: #8b949e; font-size: 0.75rem; }}
   .score-unit {{ color: #8b949e; font-size: 0.75rem; margin-left: 0.2rem; }}
   .toggle {{ font-size: 0.7rem; color: #388bfd; margin-left: 0.5rem; cursor: pointer; }}
+  .copy-sha {{
+    background: none; border: none; cursor: pointer; padding: 0 0.15rem;
+    color: #484f58; font-size: 0.75rem; vertical-align: middle; line-height: 1;
+    opacity: 0;
+  }}
+  tr.commit-row:hover .copy-sha {{ opacity: 1; }}
+  .copy-sha:hover {{ color: #8b949e; }}
   a {{ color: #58a6ff; text-decoration: none; }}
   a:hover {{ text-decoration: underline; }}
   details {{ margin-top: 0.4rem; }}
@@ -229,11 +244,91 @@ def generate(store: Store, output_path: Path, github_url: str | None = None) -> 
     overflow-y: auto;
     color: #c9d1d9;
   }}
+  /* ── Top nav ── */
+  .topnav {{
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 1.25rem; height: 2.6rem;
+    background: #010409; border-bottom: 1px solid #21262d;
+    font-size: 0.78rem; position: sticky; top: 0; z-index: 10;
+  }}
+  .nav-left {{ display: flex; align-items: center; gap: 0.6rem; }}
+  .nav-brand {{
+    font-weight: 700; font-size: 0.82rem; letter-spacing: -0.01em;
+    color: #e6edf3; font-family: monospace;
+  }}
+  .nav-sep {{ color: #30363d; }}
+  .epoch-picker {{ position: relative; }}
+  .epoch-btn {{
+    background: none; border: 1px solid #30363d; color: #8b949e;
+    border-radius: 5px; padding: 0.18rem 0.55rem; font-size: 0.75rem;
+    cursor: pointer; display: flex; align-items: center; gap: 0.3rem;
+    white-space: nowrap;
+  }}
+  .epoch-btn:hover {{ border-color: #8b949e; color: #e6edf3; }}
+  .epoch-btn .chevron {{ font-size: 0.6rem; opacity: 0.6; }}
+  .epoch-menu {{
+    position: absolute; top: calc(100% + 4px); left: 0;
+    background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+    min-width: 11rem; box-shadow: 0 8px 24px rgba(0,0,0,.5);
+    z-index: 20; overflow: hidden;
+  }}
+  .epoch-menu.hidden {{ display: none; }}
+  .epoch-filter {{
+    width: 100%; background: #0d1117; border: none;
+    border-bottom: 1px solid #21262d; color: #e6edf3;
+    padding: 0.4rem 0.6rem; font-size: 0.75rem; outline: none;
+    box-sizing: border-box;
+  }}
+  .epoch-filter::placeholder {{ color: #484f58; }}
+  .epoch-list {{ list-style: none; margin: 0; padding: 0.25rem 0; max-height: 14rem; overflow-y: auto; }}
+  .epoch-list li a {{
+    display: block; padding: 0.3rem 0.75rem;
+    color: #c9d1d9; text-decoration: none; font-size: 0.75rem;
+  }}
+  .epoch-list li a:hover {{ background: #21262d; color: #e6edf3; }}
+  .epoch-list li.current a {{ color: #58a6ff; font-weight: 600; }}
+  .epoch-list li.hidden {{ display: none; }}
+  .nav-right {{ display: flex; align-items: center; }}
+  .nav-gh {{
+    display: flex; align-items: center; gap: 0.4rem;
+    color: #484f58; text-decoration: none; font-size: 0.72rem;
+    transition: color 0.15s;
+  }}
+  .nav-gh:hover {{ color: #8b949e; }}
+  .nav-gh svg {{ width: 15px; height: 15px; fill: currentColor; flex-shrink: 0; }}
 </style>
 </head>
 <body>
 <div id="toast"></div>
-<h1>branch-bench report</h1>
+<nav class="topnav">
+  <div class="nav-left">
+    <span class="nav-brand">branch-bench</span>
+    <span class="nav-sep">·</span>
+    <div class="epoch-picker" id="epochPicker">
+      <button class="epoch-btn" id="epochBtn" onclick="toggleEpochMenu(event)">
+        Epoch {current_epoch} <span class="chevron">▾</span>
+      </button>
+      <div class="epoch-menu hidden" id="epochMenu">
+        <input class="epoch-filter" id="epochFilter" type="text" placeholder="filter epochs…"
+               oninput="filterEpochs(this.value)" autocomplete="off" />
+        <ul class="epoch-list" id="epochList"></ul>
+      </div>
+    </div>
+  </div>
+  <a class="nav-gh" href="https://github.com/retronym/branch-bench" target="_blank" rel="noopener">
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38
+               0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13
+               -.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66
+               .07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15
+               -.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0
+               1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82
+               1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01
+               1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+    </svg>
+    Generated by branch-bench
+  </a>
+</nav>
 
 <div class="section">Benchmark trends</div>
 <div class="mode-bar">
@@ -271,6 +366,48 @@ def generate(store: Store, output_path: Path, github_url: str | None = None) -> 
 const benchData = {bench_json};
 const commits = {rows_json};
 const githubUrl = {github_url_json};
+const currentEpoch = {current_epoch};
+const epochLinks = {epoch_links_json};
+
+// ── Epoch picker ──────────────────────────────────────────────────────────────
+(function() {{
+  const list = document.getElementById('epochList');
+  for (const e of epochLinks) {{
+    const li = document.createElement('li');
+    if (e.epoch === currentEpoch) li.className = 'current';
+    li.innerHTML = `<a href="${{esc(e.path)}}">Epoch ${{e.epoch}}${{e.epoch === currentEpoch ? ' ✓' : ''}}</a>`;
+    list.appendChild(li);
+  }}
+  // Hide the button entirely when there is only one epoch
+  if (epochLinks.length <= 1) {{
+    document.getElementById('epochPicker').style.display = 'none';
+  }}
+}})();
+
+function toggleEpochMenu(e) {{
+  e.stopPropagation();
+  const menu = document.getElementById('epochMenu');
+  const hidden = menu.classList.toggle('hidden');
+  if (!hidden) {{
+    const f = document.getElementById('epochFilter');
+    f.value = '';
+    filterEpochs('');
+    f.focus();
+  }}
+}}
+
+function filterEpochs(q) {{
+  const lower = q.toLowerCase();
+  document.querySelectorAll('#epochList li').forEach(li => {{
+    li.classList.toggle('hidden', !li.textContent.toLowerCase().includes(lower));
+  }});
+}}
+
+document.addEventListener('click', e => {{
+  if (!document.getElementById('epochPicker').contains(e.target)) {{
+    document.getElementById('epochMenu').classList.add('hidden');
+  }}
+}});
 
 let _toastTimer;
 function showToast(msg) {{
@@ -319,7 +456,7 @@ const layout = (unit, mode_label) => ({{
   margin: {{ t: 10, r: 20, b: 220, l: 70 }},
   xaxis: {{ tickangle: -55, gridcolor: '#21262d', color: '#8b949e', automargin: true,
             categoryorder: 'array', categoryarray: categoryArray }},
-  yaxis: {{ title: unit + ' (' + mode_label + ')', gridcolor: '#21262d', color: '#8b949e' }},
+  yaxis: {{ title: unit + ' (' + mode_label + ')', gridcolor: '#21262d', color: '#8b949e', rangemode: 'tozero' }},
   legend: {{ bgcolor: 'transparent', font: {{ size: 10 }} }},
   height: 520,
 }});
@@ -578,13 +715,16 @@ for (const c of commits) {{
     ? '<span class="na">pending</span>'
     : `${{runCount}} run${{runCount !== 1 ? 's' : ''}} <span class="toggle">[expand]</span>`;
 
-  const shaHtml = githubUrl
+  const shaLink = githubUrl
     ? `<a href="${{githubUrl}}/commit/${{esc(c.sha)}}" target="_blank" rel="noopener"
           title="View diff on GitHub" style="font-family:monospace;font-size:0.78rem"
           onclick="event.stopPropagation()">${{esc(c.short_sha)}}</a>`
     : `<code style="font-size:0.78rem">${{esc(c.short_sha)}}</code>`;
+  const copyBtn = `<button class="copy-sha" title="Copy full SHA"
+    onclick="event.stopPropagation();navigator.clipboard.writeText('${{esc(c.sha)}}').then(()=>showToast('Copied ${{esc(c.short_sha)}}'))"
+    >⎘</button>`;
   commitTr.innerHTML = `
-    <td>${{shaHtml}}</td>
+    <td style="white-space:nowrap">${{shaLink}} ${{copyBtn}}</td>
     <td>${{esc(c.message.substring(0, 72))}}</td>
     <td style="white-space:nowrap">${{esc(c.ts)}}</td>
     <td>${{testCell}}</td>
