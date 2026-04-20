@@ -153,14 +153,58 @@ def run_commit(
     return True
 
 
+def _resolve_ref(repo_path: Path, ref: str, flag: str, log: Callable[[str], None]) -> str | None:
+    """Resolve *ref* to a full SHA, printing a clear error via *log* on failure."""
+    sha = git.rev_parse(repo_path, ref)
+    if sha is None:
+        log(f"[!] {flag} {ref!r}: not a valid git ref — aborting.")
+    return sha
+
+
+def _expand_refs(
+    repo_path: Path,
+    refs: tuple[str, ...],
+    flag: str,
+    log: Callable[[str], None],
+) -> list[str] | None:
+    """Expand a mix of git refs and range specs to a deduplicated list of full SHAs.
+
+    Range specs (containing '..') are expanded via ``git log``; individual refs
+    are resolved with ``git rev-parse``.  Returns None if any ref fails to resolve
+    so callers can abort cleanly.
+    """
+    shas: list[str] = []
+    seen: set[str] = set()
+    ok = True
+    for ref in refs:
+        if ".." in ref:
+            expanded = git.expand_range(repo_path, ref)
+            if not expanded:
+                log(f"[!] {flag} {ref!r}: range yielded no commits — skipping.")
+            for sha in expanded:
+                if sha not in seen:
+                    seen.add(sha)
+                    shas.append(sha)
+        else:
+            sha = git.rev_parse(repo_path, ref)
+            if sha is None:
+                log(f"[!] {flag} {ref!r}: not a valid git ref — skipping.")
+                ok = False
+                continue
+            if sha not in seen:
+                seen.add(sha)
+                shas.append(sha)
+    return shas if ok else None
+
+
 def run_branch(
     cfg: Config,
     store: Store,
     *,
     max_commits: int | None = None,
-    from_sha: str | None = None,
-    to_sha: str | None = None,
-    target_shas: tuple[str, ...] = (),
+    from_ref: str | None = None,
+    to_ref: str | None = None,
+    target_refs: tuple[str, ...] = (),
     strategy: str = "bisect",
     run_tests: bool = True,
     run_benchmarks: bool = True,
@@ -180,6 +224,31 @@ def run_branch(
     original_ref = git.current_ref(repo_path)
     log(f"Current ref: {original_ref}")
 
+    # ── Resolve all user-supplied refs to full SHAs now, before any git checkout ──
+    from_sha: str | None = None
+    if from_ref:
+        from_sha = _resolve_ref(repo_path, from_ref, "--from", log)
+        if from_sha is None:
+            return
+        log(f"  --from resolved: {from_ref!r} → {from_sha[:8]}")
+
+    to_sha: str | None = None
+    if to_ref:
+        to_sha = _resolve_ref(repo_path, to_ref, "--to", log)
+        if to_sha is None:
+            return
+        log(f"  --to   resolved: {to_ref!r} → {to_sha[:8]}")
+
+    resolved_targets: list[str] = []
+    if target_refs:
+        result = _expand_refs(repo_path, target_refs, "--sha", log)
+        if result is None:
+            return
+        resolved_targets = result
+        for orig, sha in zip(target_refs, resolved_targets[:len(target_refs)]):
+            if orig != sha and not sha.startswith(orig):
+                log(f"  --sha  resolved: {orig!r} → {sha[:8]}")
+
     merge_base = git.find_merge_base(repo_path, cfg.repo.branch)
     if merge_base:
         log(f"Merge base with main/master: {merge_base[:8]} — limiting to branch-only commits")
@@ -187,7 +256,7 @@ def run_branch(
 
     def _find(sha: str, lst: list) -> int | None:
         for i, c in enumerate(lst):
-            if c.sha.startswith(sha) or c.short_sha.startswith(sha):
+            if c.sha == sha or c.sha.startswith(sha) or c.short_sha.startswith(sha):
                 return i
         return None
 
@@ -196,13 +265,13 @@ def run_branch(
     if from_sha:
         idx = _find(from_sha, run_range)
         if idx is None:
-            log(f"[!] --from-sha {from_sha!r} not found on branch — aborting.")
+            log(f"[!] --from {from_ref!r} (→ {from_sha[:8]}) not found on branch — aborting.")
             return
         run_range = run_range[idx:]
     if to_sha:
         idx = _find(to_sha, run_range)
         if idx is None:
-            log(f"[!] --to-sha {to_sha!r} not found on branch — aborting.")
+            log(f"[!] --to {to_ref!r} (→ {to_sha[:8]}) not found on branch — aborting.")
             return
         run_range = run_range[: idx + 1]
 
@@ -213,7 +282,7 @@ def run_branch(
     log(f"Found {len(run_range)} commit(s) on branch '{cfg.repo.branch}'")
 
     # Persist ALL commits with absolute positions so the report order is always correct.
-    # Using all_commits (not the sliced run_range) prevents --from-sha from corrupting positions.
+    # Using all_commits (not the sliced run_range) prevents --from from corrupting positions.
     for i, commit in enumerate(all_commits):
         store.save_commit(
             sha=commit.sha,
@@ -240,15 +309,15 @@ def run_branch(
 
     # --sha: restrict the run loop to specific commits (saves/retires still use the full list)
     run_commits = run_range
-    if target_shas:
-        seen: set[str] = set()
+    if resolved_targets:
+        seen_shas: set[str] = set()
         run_commits = []
-        for prefix in target_shas:
-            idx = _find(prefix, all_commits)
+        for sha in resolved_targets:
+            idx = _find(sha, all_commits)
             if idx is None:
-                log(f"[!] --sha {prefix!r} not found on branch — skipping.")
-            elif all_commits[idx].sha not in seen:
-                seen.add(all_commits[idx].sha)
+                log(f"[!] --sha resolved to {sha[:8]} but that commit is not on branch — skipping.")
+            elif all_commits[idx].sha not in seen_shas:
+                seen_shas.add(all_commits[idx].sha)
                 run_commits.append(all_commits[idx])
         if not run_commits:
             log("No matching commits to run.")

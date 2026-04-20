@@ -95,6 +95,37 @@ def github_remote_url(repo: Path) -> str | None:
     return candidates.get("origin") or next(iter(candidates.values()), None)
 
 
+def rev_parse(repo: Path, ref: str) -> str | None:
+    """Resolve any git ref (SHA prefix, HEAD~N, branch, tag) to a full commit SHA.
+
+    Returns None when the ref does not exist or does not resolve to a commit.
+    The ``^{commit}`` peeling ensures annotated tags are dereferenced.
+    """
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"],
+        cwd=repo, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def expand_range(repo: Path, range_spec: str) -> list[str]:
+    """Return full SHAs for all commits selected by *range_spec*.
+
+    Accepts any syntax ``git log`` understands: ``x..y``, ``x...y``,
+    ``HEAD~5..HEAD``, etc.  Returns commits newest-first (``git log`` order).
+    Returns an empty list when the range is invalid or empty.
+    """
+    result = subprocess.run(
+        ["git", "log", "--format=%H", range_spec, "--"],
+        cwd=repo, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return []
+    return [s for s in result.stdout.splitlines() if s.strip()]
+
+
 def checkout(repo: Path, sha: str) -> None:
     subprocess.run(["git", "checkout", "--quiet", sha], cwd=repo, check=True)
 

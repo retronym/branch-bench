@@ -95,29 +95,43 @@ All commands accept `--config PATH` to point at a `bench.toml` in a non-default 
 |---|---|---|
 | `--strategy bisect\|linear` | `bisect` | bisect: endpoints + midpoints first for a quick curve shape; linear: oldest-to-newest |
 | `-n N` / `--commits N` | all | Max commits to process |
-| `--from-sha SHA` | — | Start range at this commit (prefix match) |
-| `--to-sha SHA` | — | End range at this commit (prefix match) |
-| `--sha SHA` | — | Run only this commit; repeatable (`--sha A --sha B`); prefix match |
+| `--from REF` / `--from-sha REF` | — | Start range at this commit — any git ref (`HEAD~5`, `v1.0`, SHA prefix) |
+| `--to REF` / `--to-sha REF` | — | End range at this commit — any git ref |
+| `--sha REF\|RANGE` | — | Run only this commit; repeatable. Accepts any git ref (`HEAD~2`, tag, SHA) or a range (`HEAD~5..HEAD`, `v1.0..v2.0`) |
 | `--all` | off | Re-run commits that already have results in the current epoch |
 | `--no-test` | off | Skip correctness tests |
 | `--no-bench` | off | Skip benchmarks |
-| `--report` | off | Generate report after run completes (implied by `--no-live-report`) |
+| `--report` | off | Generate report after run completes |
+| `--open` | off | Open the report in your browser when done (implies `--report`) |
 | `--no-live-report` | off | Disable per-commit report regeneration during the run |
+| `-v` / `--verbose` | off | Stream bench command output live as it runs. `-vv` also streams the test command |
 | `--epoch N` | current | Run in a specific past epoch instead of the current one |
 
-`--sha` is the fastest way to re-run noisy commits:
+All ref arguments are resolved to full SHAs via `git rev-parse` before anything runs, so the resolved SHA is what gets stored and shown in the report. The log line confirms each resolution:
 
-```bash
-branch-bench run --sha abc123 --sha def456 --all
+```
+  --from resolved: 'HEAD~3' → 3063d732
+  --sha  resolved: 'HEAD~5..HEAD' → 3063d732  (then 649a909c, ab114d0d …)
 ```
 
-Then switch to **Aggregate** mode in the report to pool raw measurements across both runs.
+`--sha` with ranges is the fastest way to re-run a band of noisy commits:
+
+```bash
+# Re-run the last 3 commits
+branch-bench run --sha HEAD~3..HEAD --all
+
+# Re-run two specific commits by name
+branch-bench run --sha HEAD~1 --sha v1.2.3 --all
+```
+
+Then switch to **Aggregate** mode in the report to pool raw measurements across runs.
 
 ### `report` options
 
 | Flag | Description |
 |---|---|
 | `--epoch N` | Regenerate the report for a specific past epoch |
+| `--open` | Open the report in your browser when done |
 
 ### `migrate` options
 
@@ -142,12 +156,40 @@ On startup `branch-bench run`:
 
 If the **first commit processed** (baseline) fails tests or produces no benchmark results, the run aborts. There is no point profiling later commits against a broken baseline. Use `--no-test` or `--no-bench` to skip checks.
 
-### Tree-SHA reuse
+### Tree-SHA reuse — curate freely without losing benchmark data
 
-Before running a commit, `branch-bench` checks whether any other commit in the current epoch has the same **git tree SHA** — meaning the source tree is byte-for-byte identical. If so, the existing results are cloned to the new commit without re-running anything. This means:
+This is the feature that makes `branch-bench` practical during active branch development. Git stores a **tree SHA** for every commit — a content hash of the entire source tree. Two commits with the same tree SHA are byte-for-byte identical in source content even if their commit metadata (SHA, author, timestamp, message) differs.
 
-- After a `git rebase` that rewrites commit metadata but not content, the next `run` or `report` restores all results instantly
-- Stale pre-rebase commits are retired from the report automatically
+Before running a commit `branch-bench` checks whether any already-benchmarked commit in the current epoch shares the same tree SHA. If it finds one, it clones the results to the new commit instantly — no rebuild, no JMH run.
+
+**What this means in practice:**
+
+You can rebase, squash, reorder, split, or amend commits freely. As long as the *source content* of a commit is unchanged, its benchmark data survives the rewrite. The typical workflow looks like this:
+
+```
+Benchmark a few commits  →  rebase / squash / amend  →  run or report again
+                                                          (results reappear instantly)
+```
+
+Concrete scenarios:
+
+- **Interactive rebase to squash fixups** — you squash a `Fix typo` commit into the substantive commit. The squashed commit's tree is unchanged; its results are immediately visible in the report under the new SHA.
+- **Reorder commits** — you move a refactor commit earlier in the stack. As long as the merge resolves identically, the tree SHA matches and results transfer.
+- **Amend commit message or author** — metadata-only changes never alter the tree SHA, so results are preserved automatically.
+- **Rebase onto a newer base** — after rebasing your branch onto a newer `main`, any commits whose source was not affected by the rebase (no conflict resolution changed them) keep their results. Only the commits that actually changed need re-running.
+- **Split a commit** — you split one commit into two. The second commit's final tree is the same as the original; benchmark results attach to it immediately.
+
+After any of these operations, run:
+
+```bash
+branch-bench report        # or: branch-bench run  (skips already-known trees)
+```
+
+Stale pre-rewrite commits are retired from the report automatically and replaced by their successors carrying the same results.
+
+**What requires a fresh benchmark run:**
+
+Only commits whose source tree genuinely changed — because you refactored code, applied a conflict resolution differently, or intentionally altered the implementation. Those show as *pending* in the report and are picked up on the next `run`.
 
 > **Edge case — rebase, re-bench, then revert:** if you re-benchmark a commit during a rebased phase and then revert to the original branch, the original commit's pre-rebase results will show rather than the newer ones (the existing run shadows the tree-SHA match). Run `--sha <sha> --all` to add a fresh run, or `branch-bench epoch` for a clean slate.
 
@@ -199,9 +241,14 @@ Add `.bench/` to `.gitignore` (or keep it — it has no build-tool-generated con
 
 The HTML report loads Plotly.js via CDN and contains all data inline. It shows:
 
-**Benchmark trend charts** — one chart per benchmark variant. Hover over a point to see score, timestamp, and short SHA; click to copy the full SHA to the clipboard. Commit SHAs link directly to the GitHub diff when a GitHub remote is detected.
+**Navigation bar** — sticky top bar with:
+- *Epoch picker* — jump between epochs; type to filter. Hidden when there is only one epoch.
+- *Benchmark picker* — one toggle button per JMH benchmark class. All active by default (no filter). Click to deselect; click again to re-select. Hidden when there is only one class. Filters both charts and the table score column simultaneously.
+- *GitHub link* — links to the repository when a GitHub remote is detected.
 
-The toolbar above the charts has two layers of controls:
+**Benchmark trend charts** — one chart per JMH benchmark method. Hover over a point to see score, timestamp, and short SHA; click to copy the full SHA to the clipboard. Commit SHAs link directly to the GitHub diff when a GitHub remote is detected.
+
+The toolbar above the charts has three layers of controls:
 
 - **Runs dropdown** — how to handle multiple runs per commit:
   - *Latest* — show only the most recent run per commit (default)
@@ -209,13 +256,15 @@ The toolbar above the charts has two layers of controls:
   - *Aggregate* — pool all raw measurements across runs, recompute mean and 99% CI from the full sample
   - *Run N* — show only a specific run index
 
+- **Overlay dropdown** — secondary metric to superimpose on a right-hand Y-axis (e.g. `gc.alloc.rate.norm` from `-prof gc`). Only visible when secondary metrics are present.
+
 - **Error bars** — what the error whiskers represent:
   - *mean ± CI* — 99% confidence interval from JMH (default)
   - *min* — downward whisker to the minimum raw measurement
   - *max* — upward whisker to the maximum raw measurement
   - *raw points* — box-and-whisker plot showing every individual JMH iteration
 
-**Commit table** — all commits in branch order with test pass/fail, benchmark score for the selected run mode, and links to flamegraphs and raw JMH JSON. Click a row to expand all runs with full stdout/stderr output, reused-tree badges, and per-run artifact links. Commit SHAs are selectable and link to GitHub diffs when a remote is detected.
+**Commit table** — all commits in branch order with test pass/fail, benchmark score for the selected run mode, and links to flamegraphs and raw JMH JSON. Click a row to expand all runs with full stdout/stderr output, reused-tree badges, and per-run artifact links. Commit SHAs are selectable and link to GitHub diffs when a remote is detected. When multiple benchmark classes are visible the score column labels each result with its method name.
 
 ---
 
@@ -224,11 +273,14 @@ The toolbar above the charts has two layers of controls:
 The recommended workflow when a measurement looks noisy:
 
 ```bash
-# Re-run one or more commits (adds a new run, doesn't replace)
-branch-bench run --sha abc123 --sha def456 --all
+# Re-run the last 5 commits (adds new runs, doesn't replace)
+branch-bench run --sha HEAD~5..HEAD --all
 
-# Regenerate the report
-branch-bench report
+# Or target specific commits by any git ref
+branch-bench run --sha abc123 --sha HEAD~1 --all
+
+# Regenerate and open the report
+branch-bench report --open
 ```
 
 Then open the report and switch **Runs → Aggregate**. This pools raw iteration data from all runs and recomputes statistics from the full sample, equivalent to having run more JMH forks.
@@ -257,6 +309,7 @@ commits             -- sha, short_sha, message, author, timestamp, branch, epoch
 runs                -- id, commit_sha, epoch, run_at, bench_cmd, test_cmd, bench_output, jmh_json_path, reused_from_sha
 test_runs           -- id, run_id, passed, tests_run, tests_failed, duration_seconds, output
 benchmark_results   -- id, run_id, benchmark, mode, score, score_error, unit, params, raw_data
+secondary_metrics   -- id, run_id, benchmark, metric, score, score_error, unit, raw_data  (e.g. gc.alloc.rate.norm from -prof gc)
 profiles            -- id, run_id, event, file_path
 settings            -- key/value store (tracks current epoch)
 ```

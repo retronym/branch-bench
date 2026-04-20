@@ -42,9 +42,16 @@ def init() -> None:
 @main.command()
 @click.option("--config", default=CONFIG_FILE, help="Path to bench.toml")
 @click.option("--commits", "-n", type=int, default=None, help="Max commits to process")
-@click.option("--from-sha", default=None, help="Start from this commit SHA")
-@click.option("--to-sha", default=None, help="Stop at this commit SHA")
-@click.option("--sha", "target_shas", multiple=True, metavar="SHA", help="Run only this commit (repeatable; prefix match)")
+@click.option("--from", "--from-sha", "from_ref", default=None, metavar="REF",
+              help="Start from this commit (any git ref: SHA, HEAD~N, tag, branch)")
+@click.option("--to", "--to-sha", "to_ref", default=None, metavar="REF",
+              help="Stop at this commit (any git ref: SHA, HEAD~N, tag, branch)")
+@click.option("--sha", "target_refs", multiple=True, metavar="REF|RANGE",
+              help=(
+                  "Run only this commit (repeatable). "
+                  "Accepts any git ref (HEAD~2, v1.0, abc123) "
+                  "or a range (HEAD~5..HEAD, v1.0..v2.0)."
+              ))
 @click.option(
     "--strategy",
     type=click.Choice(["bisect", "linear"]),
@@ -70,9 +77,9 @@ def init() -> None:
 def run(
     config: str,
     commits: int | None,
-    from_sha: str | None,
-    to_sha: str | None,
-    target_shas: tuple[str, ...],
+    from_ref: str | None,
+    to_ref: str | None,
+    target_refs: tuple[str, ...],
     strategy: str,
     no_test: bool,
     no_bench: bool,
@@ -92,9 +99,9 @@ def run(
             cfg=cfg,
             store=store,
             max_commits=commits,
-            from_sha=from_sha,
-            to_sha=to_sha,
-            target_shas=target_shas,
+            from_ref=from_ref,
+            to_ref=to_ref,
+            target_refs=target_refs,
             strategy=strategy,
             run_tests=not no_test,
             run_benchmarks=not no_bench,
