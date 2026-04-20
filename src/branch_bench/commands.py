@@ -64,12 +64,12 @@ def run_bench(
     jmh_save_name: str = "results",
     tee: Callable[[str], None] | None = None,
 ) -> tuple[list[BenchmarkResult], list[Path], str, Path | None]:
-    """Run bench_cmd, return (benchmark_results, svg_paths, raw_output, saved_json_path).
+    """Run bench_cmd, return (benchmark_results, artifact_paths, raw_output, saved_json_path).
 
     Substitutions available in bench_cmd:
       {out}     — path to a temp file where JMH should write JSON results (-rff {out})
       {out_dir} — path to a temp directory for profiler output (dir={out_dir})
-    Any *.svg files found in {out_dir} are returned as profile paths.
+    All files found in {out_dir} are returned as artifact paths.
     If jmh_save_dir is given the JSON is copied there for posterity.
     When *tee* is given, stdout+stderr are streamed to it line-by-line in real time.
     """
@@ -96,13 +96,11 @@ def run_bench(
 
         bench_results = parse_jmh_json(out_path)
 
-        flamegraphs = sorted(
-            p for ext in ("*.svg", "*.html") for p in out_dir_path.glob(f"**/{ext}")
-        )
+        artifacts = sorted(p for p in out_dir_path.rglob("*") if p.is_file())
         kept: list[Path] = []
-        for fg in flamegraphs:
-            dest = out_path.parent / fg.name
-            shutil.copy2(fg, dest)
+        for artifact in artifacts:
+            dest = out_path.parent / artifact.name
+            shutil.copy2(artifact, dest)
             kept.append(dest)
 
     return bench_results, kept, raw_output, saved_json

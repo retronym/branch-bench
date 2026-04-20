@@ -56,9 +56,13 @@ def _try_relative(p: Path) -> Path:
 
 
 def _infer_event(fg: Path) -> str:
+    if fg.suffix.lower() == ".jfr":
+        return "jfr"
     name = fg.stem.lower()
     for base in ("alloc", "wall", "lock", "cpu"):
         if base in name:
+            if "collapsed" in name:
+                return f"{base}-collapsed"
             if "reverse" in name:
                 return f"{base}-reverse"
             if "forward" in name:
@@ -121,7 +125,7 @@ def run_commit(
         run_dir = cfg.run_assets_dir(epoch, commit.short_sha, commit.message, run_number)
         run_dir.mkdir(parents=True, exist_ok=True)
         try:
-            bench_results, svgs, bench_output, saved_json = commands.run_bench(
+            bench_results, artifacts, bench_output, saved_json = commands.run_bench(
                 cfg.commands.bench_cmd,
                 repo_path,
                 jmh_save_dir=run_dir,
@@ -135,9 +139,9 @@ def run_commit(
             store.save_benchmark_results(run_id, bench_results)
             log(f"  Benchmarks: {len(bench_results)} result(s)")
 
-            for svg in svgs:
-                dest = run_dir / svg.name
-                shutil.move(str(svg), dest)
+            for artifact in artifacts:
+                dest = run_dir / artifact.name
+                shutil.move(str(artifact), dest)
                 event = _infer_event(dest)
                 rel = _try_relative(dest)
                 store.save_profile(run_id, event, str(rel))
