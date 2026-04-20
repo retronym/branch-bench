@@ -22,6 +22,9 @@ def test_create_run():
     store.save_commit("abc123", "abc123"[:8], "msg", "a@b.com", 1700000000, "main")
     run_id = store.create_run("abc123", bench_cmd="./mill foo.jmh.run", test_cmd="./mill foo.test")
     assert isinstance(run_id, int)
+    # has_runs with defaults (run_benchmarks=True) requires benchmark_results rows
+    assert not store.has_runs("abc123")
+    store.save_benchmark_results(run_id, [BenchmarkResult("bench.M.run", "avgt", 1.0, None, "ns/op")])
     assert store.has_runs("abc123")
     assert not store.has_runs("unknown")
 
@@ -34,7 +37,8 @@ def test_create_run():
 def test_epoch_resets_has_runs():
     store = make_store()
     store.save_commit("abc123", "abc123"[:8], "msg", "a@b.com", 1700000000, "main")
-    store.create_run("abc123", bench_cmd=None, test_cmd=None)
+    run_id = store.create_run("abc123", bench_cmd=None, test_cmd=None)
+    store.save_benchmark_results(run_id, [BenchmarkResult("bench.M.run", "avgt", 1.0, None, "ns/op")])
     assert store.has_runs("abc123")
 
     n = store.new_epoch()

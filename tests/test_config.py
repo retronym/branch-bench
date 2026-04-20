@@ -14,7 +14,7 @@ def test_load_template():
     assert cfg.repo.branch == "main"
     assert cfg.commands.test_cmd == ""
     assert cfg.commands.bench_cmd == ""
-    assert cfg.output.db == ".branchbench/bench-results.db"
+    assert cfg.output.dir == ".bench"
 
 
 def test_load_custom():
@@ -28,9 +28,7 @@ test_cmd = "./mill tests.jvm.2_13_16.test"
 bench_cmd = "./mill benchmark.runJmh MyBench -rff {out} -prof async:libPath=/path/libasyncProfiler.dylib;dir={out_dir} -wi 5 -i 5 -f1"
 
 [output]
-db = "results.db"
-report = "out.html"
-profiles_dir = "flame"
+dir = "out"
 """
     with tempfile.NamedTemporaryFile(suffix=".toml", mode="w", delete=False) as f:
         f.write(content)
@@ -41,4 +39,4 @@ profiles_dir = "flame"
     assert "mill" in cfg.commands.test_cmd
     assert "{out}" in cfg.commands.bench_cmd
     assert "{out_dir}" in cfg.commands.bench_cmd
-    assert cfg.output.profiles_dir == "flame"
+    assert cfg.output.dir == "out"

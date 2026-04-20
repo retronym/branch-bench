@@ -18,6 +18,9 @@ branch-bench = "branch_bench.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/branch_bench"]
 
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_classes = []
