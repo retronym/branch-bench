@@ -16,7 +16,7 @@ Items are roughly priority-ordered within sections. ✅ = implemented.
 - ✅ **Verbose streaming** — `-v` streams bench output live; `-vv` also streams test output.
 - ✅ **`--open` flag** — opens report in browser after `run` or `report` command.
 - ✅ **`migrate` command** — moves files from old layout to current `epoch-N/assets/` layout.
-- ✅ **Jinja2 template** — report HTML extracted to `src/branch_bench/templates/report.html`; Python injects JSON data; JS lives in `{% raw %}` block.
+- ✅ **Jinja2 template** — report HTML extracted to `src/branch_bench/templates/report.html`; rendered to `epoch-N/index.html`; Python injects JSON data; JS lives in `{% raw %}` block.
 - ✅ **GitHub Actions CI** — `.github/workflows/ci.yml`, Python 3.11/3.12/3.13 matrix.
 
 ---

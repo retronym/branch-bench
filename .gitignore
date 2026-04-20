@@ -38,6 +38,11 @@ ENV/
 *.swo
 
 # -----------------------
+# Preview (generated artifact)
+# -----------------------
+preview/
+
+# -----------------------
 # Local config / secrets
 # -----------------------
 .claude/settings.local.json

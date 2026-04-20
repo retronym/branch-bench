@@ -209,7 +209,7 @@ Everything lives under `.bench/` (configurable via `output.dir`):
 ├── bench.db                         # SQLite database (all epochs)
 ├── index.html                       # Epoch listing — link to share with colleagues
 ├── epoch-1/
-│   ├── report.html                  # Self-contained epoch report
+│   ├── index.html                   # Self-contained epoch report
 │   └── assets/
 │       ├── dc2522e7-integrate-benchmarks/
 │       │   ├── run-1/
@@ -222,12 +222,12 @@ Everything lives under `.bench/` (configurable via `output.dir`):
 │           └── run-1/
 │               └── jmh-results.json
 └── epoch-2/
-    ├── report.html
+    ├── index.html
     └── assets/
         └── ...
 ```
 
-**Zip-and-send:** `epoch-N/` is self-contained — `report.html` references profiles and JSON via relative paths within the same directory tree. Zip it and send it, or drag the folder to a shared drive; everything works offline.
+**Zip-and-send:** `epoch-N/` is self-contained — `index.html` references profiles and JSON via relative paths within the same directory tree. Zip it and send it, or drag the folder to a shared drive; everything works offline.
 
 **GitHub Pages:** push `.bench/` to a `gh-pages` branch. `index.html` at the root lists all epoch reports as clickable links.
 

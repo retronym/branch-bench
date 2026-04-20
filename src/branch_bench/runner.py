@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -10,6 +11,17 @@ from .config import Config
 from .git import Commit
 from .report import generate, generate_index
 from .storage import Store
+
+
+def _format_eta(secs: float) -> str:
+    s = int(secs)
+    if s < 60:
+        return f"{s}s"
+    m, s = divmod(s, 60)
+    if m < 60:
+        return f"{m}m {s:02d}s" if s else f"{m}m"
+    h, m = divmod(m, 60)
+    return f"{h}h {m:02d}m"
 
 
 def bisect_order(n: int) -> list[int]:
@@ -337,6 +349,16 @@ def run_branch(
 
     indices = bisect_order(len(run_commits)) if strategy == "bisect" else list(range(len(run_commits)))
 
+    runs_done: int = 0
+    run_time_total: float = 0.0
+
+    def _eta_str(pos: int) -> str:
+        if runs_done <= 0:
+            return ""
+        avg = run_time_total / runs_done
+        remaining = len(indices) - pos
+        return f" — ETA ~{_format_eta(avg * remaining)}"
+
     try:
         first_run = True  # tracks the first commit we actually execute (not skip)
         for pos, idx in enumerate(indices):
@@ -357,7 +379,7 @@ def run_branch(
                     require_test=run_tests,
                 )
                 if source:
-                    log(f"[{pos+1}/{len(indices)}] {commit.short_sha} — tree identical to {source['short_sha']}, reusing results")
+                    log(f"[{pos+1}/{len(indices)}] {commit.short_sha} — tree identical to {source['short_sha']}, reusing results{_eta_str(pos)}")
                     store.clone_run(source["run_id"], commit.sha, reused_from_sha=source["short_sha"])
                     if live_report:
                         generate(store, report_path, github_url=github_url)
@@ -366,7 +388,11 @@ def run_branch(
                         first_run = False
                     continue
 
-            log(f"[{pos+1}/{len(indices)}] {commit.short_sha}")
+            log(f"[{pos+1}/{len(indices)}] {commit.short_sha}{_eta_str(pos)}")
+            if live_report:
+                generate(store, report_path, github_url=github_url, next_sha=commit.sha)
+                generate_index(cfg)
+            _run_start = time.monotonic()
             ok = run_commit(
                 commit=commit,
                 cfg=cfg,
@@ -377,6 +403,8 @@ def run_branch(
                 log=log,
                 verbose=verbose,
             )
+            run_time_total += time.monotonic() - _run_start
+            runs_done += 1
             if live_report:
                 generate(store, report_path, github_url=github_url)
                 generate_index(cfg)

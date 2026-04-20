@@ -44,7 +44,7 @@ src/branch_bench/
 │                    _bench_group() / _bench_display(): split JMH FQN into class / simple name.
 │                    Uses jinja2.PackageLoader("branch_bench", "templates").
 └── templates/
-    └── report.html  Jinja2 template for the epoch report.
+    └── report.html  Jinja2 template for the epoch report (rendered to epoch-N/index.html).
                      Data injected at top of <script> as {{ var | safe }} (pre-serialised JSON).
                      All JavaScript wrapped in {% raw %}...{% endraw %} — edit JS freely with
                      normal { } brace syntax, no escaping needed.
@@ -65,7 +65,7 @@ src/branch_bench/
 Substitution happens in Python before the shell sees the string. Because `shell=True`, the user must single-quote the `-prof async:...` argument in `bench_cmd` to protect semicolons from the shell.
 
 ### Jinja2 template for the report
-`report.html` lives in `src/branch_bench/templates/`. Python injects pre-serialised JSON at the top of the `<script>` block using `{{ var | safe }}`. The rest of the script (pure JavaScript) is inside `{% raw %}...{% endraw %}` so Jinja2 ignores all `{ }` braces. CSS is also outside `{% raw %}` and uses literal `{ }` — Jinja2 only triggers on `{{ }}`, not on single braces.
+`report.html` lives in `src/branch_bench/templates/` and is rendered to `epoch-N/index.html`. Python injects pre-serialised JSON at the top of the `<script>` block using `{{ var | safe }}`. The rest of the script (pure JavaScript) is inside `{% raw %}...{% endraw %}` so Jinja2 ignores all `{ }` braces. CSS is also outside `{% raw %}` and uses literal `{ }` — Jinja2 only triggers on `{{ }}`, not on single braces.
 
 To add a new data variable: serialise it in Python's `generate()`, pass it to `tmpl.render()`, and add `const newVar = {{ new_var | safe }};` at the top of the script block in the template (before the `{% raw %}` tag).
 
@@ -172,7 +172,7 @@ profiles            (id PK, run_id FK, event, file_path)
 ├── bench.db
 ├── index.html
 └── epoch-N/
-    ├── report.html
+    ├── index.html
     └── assets/
         └── <short_sha>-<slug>/
             └── run-<N>/
@@ -209,5 +209,5 @@ profiles            (id PK, run_id FK, event, file_path)
 - **`shell=True` in commands.py** — required for the user's shell quoting of `-prof async:...` to work. List-based subprocess would break semicolons in profiler arguments.
 - **`bisect_order` always puts index 0 first** — the commit-0 abort gate depends on this. Don't reorder.
 - **`ON CONFLICT(sha) DO UPDATE SET epoch=...` in `save_commit`** — commits are upserted to update epoch/position/tree_sha on re-registration. Must not be `INSERT OR IGNORE`.
-- **`{% raw %}...{% endraw %}` in report.html** — all JavaScript lives inside this block. Jinja2 must not process JS braces. Never move the data injection lines (`const x = {{ y | safe }}`) inside `{% raw %}`.
+- **`{% raw %}...{% endraw %}` in templates/report.html** — all JavaScript lives inside this block. Jinja2 must not process JS braces. Never move the data injection lines (`const x = {{ y | safe }}`) inside `{% raw %}`.
 - **`has_runs()` default is `run_benchmarks=True`** — the runner's skip logic requires benchmark data to consider a commit "done". If you add a `--no-bench` path that still calls `has_runs()`, pass `run_benchmarks=False`.

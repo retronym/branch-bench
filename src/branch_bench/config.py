@@ -50,7 +50,7 @@ class Config:
         return self.base_dir() / f"epoch-{epoch}"
 
     def report_path(self, epoch: int) -> Path:
-        return self.epoch_dir(epoch) / "report.html"
+        return self.epoch_dir(epoch) / "index.html"
 
     def run_assets_dir(self, epoch: int, short_sha: str, message: str, run_number: int) -> Path:
         return self.epoch_dir(epoch) / "assets" / commit_slug(short_sha, message) / f"run-{run_number}"

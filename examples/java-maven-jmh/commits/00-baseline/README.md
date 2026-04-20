@@ -43,7 +43,7 @@ pip install branch-bench
 
 ```bash
 branch-bench run      # walk all commits, build + benchmark each one
-branch-bench report   # generate .bench/epoch-1/report.html
+branch-bench report   # generate .bench/epoch-1/index.html
 branch-bench show     # open report in browser
 ```
 

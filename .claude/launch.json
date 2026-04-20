@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "preview-report",
+      "runtimeExecutable": "/Users/jz/.local/pipx/venvs/branch-bench/bin/python",
+      "runtimeArgs": ["-m", "http.server", "7823", "--directory", "preview"],
+      "port": 7823
+    }
+  ]
+}

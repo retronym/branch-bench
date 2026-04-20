@@ -26,12 +26,12 @@ def generate_index(cfg) -> None:
 
     rows = ""
     for ep_dir in epoch_dirs:
-        report = ep_dir / "report.html"
+        report = ep_dir / "index.html"
         if not report.exists():
             continue
         num = ep_dir.name.split("-", 1)[1]
         mtime = datetime.fromtimestamp(report.stat().st_mtime, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
-        rows += f'<tr><td><a href="{html.escape(ep_dir.name)}/report.html">Epoch {html.escape(num)}</a></td><td>{mtime}</td></tr>\n'
+        rows += f'<tr><td><a href="{html.escape(ep_dir.name)}/">Epoch {html.escape(num)}</a></td><td>{mtime}</td></tr>\n'
 
     content = f"""<!DOCTYPE html>
 <html lang="en">
@@ -89,7 +89,7 @@ def _bench_display(group: str) -> str:
     return group[idx + 1:] if idx >= 0 else group
 
 
-def generate(store: Store, output_path: Path, github_url: str | None = None) -> None:
+def generate(store: Store, output_path: Path, github_url: str | None = None, next_sha: str | None = None) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     report_dir = output_path.parent
     commits = store.all_commits()
@@ -182,6 +182,7 @@ def generate(store: Store, output_path: Path, github_url: str | None = None) -> 
             "runs": commit_run_rows,
             "latest_test": latest_test,
             "latest_scores": latest_scores,
+            "in_progress": next_sha is not None and commit["sha"] == next_sha,
         })
 
     # Benchmark groups: ordered list of unique class names inferred from JMH benchmark names.
@@ -203,9 +204,9 @@ def generate(store: Store, output_path: Path, github_url: str | None = None) -> 
             for g in seen_groups
         ]),
         current_epoch=current_epoch,
-        # Relative paths from epoch-N/report.html to epoch-M/report.html
+        # Relative paths from epoch-N/index.html to epoch-M/index.html
         epoch_links_json=json.dumps([
-            {"epoch": ep, "path": f"../epoch-{ep}/report.html"}
+            {"epoch": ep, "path": f"../epoch-{ep}/"}
             for ep in all_epochs
         ]),
     )
