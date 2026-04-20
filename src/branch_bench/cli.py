@@ -57,7 +57,16 @@ def init() -> None:
 @click.option("--all/--skip-existing", "run_all", default=False, help="Re-run already-processed commits")
 @click.option("--no-live-report", is_flag=True, default=False, help="Disable per-commit report updates")
 @click.option("--report", "auto_report", is_flag=True, default=False, help="Generate report after run (always on with live report)")
+@click.option("--open", "open_browser", is_flag=True, default=False, help="Open the report in your browser when done (implies --report)")
 @click.option("--epoch", "epoch_override", type=int, default=None, help="Run in a specific epoch (default: current)")
+@click.option(
+    "-v", "--verbose", count=True,
+    help=(
+        "Stream command output as it runs. "
+        "-v streams the bench command; "
+        "-vv also streams the test command."
+    ),
+)
 def run(
     config: str,
     commits: int | None,
@@ -70,7 +79,9 @@ def run(
     run_all: bool,
     no_live_report: bool,
     auto_report: bool,
+    open_browser: bool,
     epoch_override: int | None,
+    verbose: int,
 ) -> None:
     """Walk commits on a branch, run tests and benchmarks, store results."""
     cfg = load_config(Path(config))
@@ -89,25 +100,27 @@ def run(
             run_benchmarks=not no_bench,
             skip_existing=not run_all,
             live_report=not no_live_report,
+            verbose=verbose,
             log=lambda s: click.echo(s),
         )
     finally:
         store.close()
 
-    if auto_report:
-        _do_report(cfg, epoch_override)
+    if auto_report or open_browser:
+        _do_report(cfg, epoch_override, open_browser=open_browser)
 
 
 @main.command()
 @click.option("--config", default=CONFIG_FILE, help="Path to bench.toml")
 @click.option("--epoch", "epoch_override", type=int, default=None, help="Generate report for a specific epoch")
-def report(config: str, epoch_override: int | None) -> None:
+@click.option("--open", "open_browser", is_flag=True, default=False, help="Open the report in your browser when done")
+def report(config: str, epoch_override: int | None, open_browser: bool) -> None:
     """Generate an HTML report from stored results."""
     cfg = load_config(Path(config))
-    _do_report(cfg, epoch_override)
+    _do_report(cfg, epoch_override, open_browser=open_browser)
 
 
-def _do_report(cfg, epoch_override: int | None = None) -> None:
+def _do_report(cfg, epoch_override: int | None = None, open_browser: bool = False) -> None:
     repo_path = Path(cfg.repo.path).resolve()
     store = Store(cfg.db_path(), epoch_override=epoch_override)
     try:
@@ -128,6 +141,8 @@ def _do_report(cfg, epoch_override: int | None = None) -> None:
     finally:
         store.close()
     click.echo(f"Report written to {out}")
+    if open_browser:
+        webbrowser.open(out.resolve().as_uri())
 
 
 @main.command()

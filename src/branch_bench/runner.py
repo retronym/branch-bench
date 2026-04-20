@@ -67,6 +67,14 @@ def _infer_event(fg: Path) -> str:
     return "cpu"
 
 
+def _make_tee(log: Callable[[str], None]) -> Callable[[str], None]:
+    """Return a callable that forwards raw subprocess output lines to *log*."""
+    def tee(line: str) -> None:
+        # Strip the trailing newline — log() adds its own.
+        log(line.rstrip("\n"))
+    return tee
+
+
 def run_commit(
     commit: Commit,
     cfg: Config,
@@ -75,8 +83,15 @@ def run_commit(
     run_tests: bool,
     run_benchmarks: bool,
     log: Callable[[str], None],
+    verbose: int = 0,
 ) -> bool:
-    """Run tests and benchmarks for one commit. Returns True if both succeeded."""
+    """Run tests and benchmarks for one commit. Returns True if both succeeded.
+
+    *verbose* controls live streaming of subprocess output:
+      0 — silent (buffered, shown only on failure via the stored output)
+      1 — stream bench command output as it runs
+      2 — stream both test and bench command output
+    """
     log(f"  Checking out {commit.short_sha}: {commit.message[:60]}")
     git.checkout(repo_path, commit.sha)
 
@@ -88,7 +103,8 @@ def run_commit(
 
     if run_tests and cfg.commands.test_cmd:
         log(f"  $ {cfg.commands.test_cmd}")
-        result = commands.run_test(cfg.commands.test_cmd, repo_path)
+        test_tee = _make_tee(log) if verbose >= 2 else None
+        result = commands.run_test(cfg.commands.test_cmd, repo_path, tee=test_tee)
         store.save_test_run(run_id, result)
         status = "PASS" if result.passed else "FAIL"
         log(f"  Tests: {status} ({result.duration_seconds:.1f}s)")
@@ -99,6 +115,7 @@ def run_commit(
     if run_benchmarks and cfg.commands.bench_cmd:
         resolved_cmd = cfg.commands.bench_cmd.replace("{out}", "<jmh-results.json>").replace("{out_dir}", "<profiles-dir>")
         log(f"  $ {resolved_cmd}")
+        bench_tee = _make_tee(log) if verbose >= 1 else None
         epoch = store.current_epoch()
         run_number = store.run_number_for_id(run_id)
         run_dir = cfg.run_assets_dir(epoch, commit.short_sha, commit.message, run_number)
@@ -109,6 +126,7 @@ def run_commit(
                 repo_path,
                 jmh_save_dir=run_dir,
                 jmh_save_name="jmh-results",
+                tee=bench_tee,
             )
             store.save_bench_output(run_id, bench_output)
             if saved_json:
@@ -148,6 +166,7 @@ def run_branch(
     run_benchmarks: bool = True,
     skip_existing: bool = True,
     live_report: bool = True,
+    verbose: int = 0,
     log: Callable[[str], None] = lambda s: print(s, file=sys.stderr),
 ) -> None:
     repo_path = Path(cfg.repo.path).resolve()
@@ -283,6 +302,7 @@ def run_branch(
                 run_tests=run_tests,
                 run_benchmarks=run_benchmarks,
                 log=log,
+                verbose=verbose,
             )
             if live_report:
                 generate(store, report_path, github_url=github_url)

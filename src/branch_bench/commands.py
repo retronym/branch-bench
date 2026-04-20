@@ -7,18 +7,53 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
+from typing import Callable
 
 from .storage import BenchmarkResult, SecondaryMetric, TestResult
 
 
-def run_test(cmd: str, cwd: Path) -> TestResult:
+def _run_cmd(
+    cmd: str,
+    cwd: Path,
+    tee: Callable[[str], None] | None = None,
+) -> tuple[int, str]:
+    """Run *cmd* in *cwd*, return (returncode, combined_output).
+
+    When *tee* is provided the command's stdout and stderr are merged and each
+    line is passed to *tee* as it arrives (useful for live progress display).
+    The same text is always accumulated and returned as the second value.
+    """
+    if tee is None:
+        result = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True)
+        return result.returncode, result.stdout + result.stderr
+
+    # Streaming mode: merge stderr into stdout, tee each line in real time.
+    proc = subprocess.Popen(
+        cmd, shell=True, cwd=cwd,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1,
+    )
+    lines: list[str] = []
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        tee(line)
+        lines.append(line)
+    proc.wait()
+    return proc.returncode, "".join(lines)
+
+
+def run_test(
+    cmd: str,
+    cwd: Path,
+    tee: Callable[[str], None] | None = None,
+) -> TestResult:
     start = time.monotonic()
-    result = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True)
+    returncode, output = _run_cmd(cmd, cwd, tee=tee)
     duration = time.monotonic() - start
     return TestResult(
-        passed=result.returncode == 0,
+        passed=returncode == 0,
         duration_seconds=duration,
-        output=result.stdout + result.stderr,
+        output=output,
     )
 
 
@@ -27,6 +62,7 @@ def run_bench(
     cwd: Path,
     jmh_save_dir: Path | None = None,
     jmh_save_name: str = "results",
+    tee: Callable[[str], None] | None = None,
 ) -> tuple[list[BenchmarkResult], list[Path], str, Path | None]:
     """Run bench_cmd, return (benchmark_results, svg_paths, raw_output, saved_json_path).
 
@@ -35,6 +71,7 @@ def run_bench(
       {out_dir} — path to a temp directory for profiler output (dir={out_dir})
     Any *.svg files found in {out_dir} are returned as profile paths.
     If jmh_save_dir is given the JSON is copied there for posterity.
+    When *tee* is given, stdout+stderr are streamed to it line-by-line in real time.
     """
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
         out_path = Path(f.name)
@@ -43,12 +80,11 @@ def run_bench(
         out_dir_path = Path(out_dir)
 
         cmd = bench_cmd.replace("{out}", str(out_path)).replace("{out_dir}", str(out_dir_path))
-        result = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True)
-        raw_output = result.stdout + result.stderr
+        returncode, raw_output = _run_cmd(cmd, cwd, tee=tee)
 
-        if result.returncode != 0:
+        if returncode != 0:
             raise RuntimeError(
-                f"Benchmark command failed (exit {result.returncode}):\n{raw_output}",
+                f"Benchmark command failed (exit {returncode}):\n{raw_output}",
                 raw_output,
             )
 
