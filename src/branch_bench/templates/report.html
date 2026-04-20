@@ -229,6 +229,29 @@ const currentEpoch         = {{ current_epoch }};
 const epochLinks           = {{ epoch_links_json | safe }};
 
 {% raw %}
+// ── URL state ─────────────────────────────────────────────────────────────────
+// State is persisted to query params (?mode=&runs=&sec=&bm=) + hash (#sha,sha).
+// All readers tolerate missing/invalid values by falling back to defaults.
+const _VALID_CHART_MODES = new Set(['mean','min','max','raw']);
+const _VALID_RUNS_MODES  = new Set(['latest','all','aggregate']);
+
+function _parseUrlState() {
+  const sp = new URLSearchParams(location.search);
+  const modeRaw = sp.get('mode') ?? '';
+  const mode = _VALID_CHART_MODES.has(modeRaw) ? modeRaw : 'mean';
+  const runsRaw = sp.get('runs') ?? '';
+  const runs = _VALID_RUNS_MODES.has(runsRaw) || /^run_\d+$/.test(runsRaw) ? runsRaw : 'latest';
+  const secRaw = sp.get('sec') ?? '';
+  const sec = secondaryMetricNames.includes(secRaw) ? secRaw : '';
+  const bmRaw = sp.get('bm') ?? '';
+  const knownGroups = new Set(benchGroups.map(bg => bg.group));
+  const bms = new Set(bmRaw.split(',').filter(b => b && knownGroups.has(b)));
+  const shas = new Set(location.hash.slice(1).split(',').filter(Boolean));
+  return { mode, runs, sec, bms, shas };
+}
+
+const { mode: _initMode, runs: _initRuns, sec: _initSec, bms: _initBms } = _parseUrlState();
+
 // Populate secondary metric dropdown; hide overlay controls when no secondary metrics exist
 (function() {
   const sel = document.getElementById('secondary-mode');
@@ -237,6 +260,7 @@ const epochLinks           = {{ epoch_links_json | safe }};
     opt.value = name; opt.textContent = name;
     sel.appendChild(opt);
   }
+  sel.value = _initSec; // restore from URL (no-op if not found)
   if (secondaryMetricNames.length === 0) {
     // Hide: preceding sep, preceding label, the select itself, and the following sep
     const nodes = [];
@@ -252,7 +276,7 @@ const epochLinks           = {{ epoch_links_json | safe }};
 
 // ── Benchmark group picker (multi-select) ─────────────────────────────────────
 // Empty set = no filter = all groups visible.
-const selectedBenchmarks = new Set();
+const selectedBenchmarks = new Set(_initBms);
 
 (function() {
   const picker = document.getElementById('benchPicker');
@@ -269,8 +293,8 @@ const selectedBenchmarks = new Set();
     btn.textContent = bg.display;
     btn.onclick = () => toggleBenchmark(bg.group);
     picker.appendChild(btn);
-    // Start with all buttons highlighted (empty selection = show all).
-    btn.classList.add('active');
+    // Highlight based on URL state (empty selection = show all = all highlighted).
+    btn.classList.toggle('active', selectedBenchmarks.size === 0 || selectedBenchmarks.has(bg.group));
   }
 })();
 
@@ -281,6 +305,7 @@ function toggleBenchmark(group) {
     selectedBenchmarks.add(group);
   }
   _applyBenchmarkFilter();
+  pushUrlState();
 }
 
 function _applyBenchmarkFilter() {
@@ -373,10 +398,14 @@ function pooledStats(rawArrays) {
 }
 
 // ── Charts ────────────────────────────────────────────────────────────────────
-let chartMode = 'mean'; // 'mean' | 'min' | 'max' | 'raw'
-let runsMode  = 'latest'; // 'latest' | 'all' | 'aggregate' | 'run_N'
-let secondaryMetric = ''; // '' | metric name
+let chartMode       = _initMode; // 'mean' | 'min' | 'max' | 'raw'
+let runsMode        = _initRuns; // 'latest' | 'all' | 'aggregate' | 'run_N'
+let secondaryMetric = _initSec;  // '' | metric name
 const chartRenderers = []; // functions(errMode, runsMode, secMetric)
+
+// Sync mode buttons to URL state (HTML defaults to 'mean' active)
+document.querySelectorAll('.mode-btn').forEach(b =>
+  b.classList.toggle('active', b.dataset.mode === chartMode));
 
 const palette = ['#388bfd','#3fb950','#d29922','#f85149','#bc8cff','#39d353'];
 const secColor = '#f0883e'; // distinct warm colour for secondary axis
@@ -579,24 +608,41 @@ for (const [name, bd] of Object.entries(benchData)) {
     opt.textContent = 'Run ' + (i + 1);
     sel.appendChild(opt);
   }
+  sel.value = runsMode; // restore from URL (run_N options now available)
+  if (sel.value !== runsMode) runsMode = 'latest'; // run index doesn't exist, fall back
 })();
+
+function pushUrlState(shas) {
+  if (shas === undefined) shas = new Set(location.hash.slice(1).split(',').filter(Boolean));
+  const sp = new URLSearchParams();
+  if (chartMode !== 'mean') sp.set('mode', chartMode);
+  if (runsMode !== 'latest') sp.set('runs', runsMode);
+  if (secondaryMetric) sp.set('sec', secondaryMetric);
+  if (selectedBenchmarks.size > 0) sp.set('bm', [...selectedBenchmarks].join(','));
+  const search = sp.toString() ? '?' + sp.toString() : '';
+  const hash = shas.size ? '#' + [...shas].join(',') : '';
+  history.pushState(null, '', search + hash || location.pathname);
+}
 
 function setChartMode(mode) {
   chartMode = mode;
   document.querySelectorAll('.mode-btn').forEach(b =>
     b.classList.toggle('active', b.dataset.mode === mode));
   chartRenderers.forEach(r => r(mode, runsMode, secondaryMetric));
+  pushUrlState();
 }
 
 function setRunsMode(val) {
   runsMode = val;
   chartRenderers.forEach(r => r(chartMode, val, secondaryMetric));
   scoreUpdaters.forEach(fn => fn());
+  pushUrlState();
 }
 
 function setSecondaryMetric(val) {
   secondaryMetric = val;
   chartRenderers.forEach(r => r(chartMode, runsMode, val));
+  pushUrlState();
 }
 
 // ── Score cell rendering (runs-mode aware) ────────────────────────────────────
@@ -678,14 +724,6 @@ function esc(s) {
     .replace(/"/g,'&quot;');
 }
 
-function expandedShas() {
-  return new Set(location.hash.slice(1).split(',').filter(Boolean));
-}
-
-function pushHash(shas) {
-  const hash = shas.size ? '#' + [...shas].join(',') : ' ';
-  history.pushState(null, '', hash);
-}
 
 const tbody = document.getElementById('tbody');
 const rowBySha = {};
@@ -818,24 +856,37 @@ for (const c of commits) {
     if (window.getSelection()?.toString()) return;
     const expanding = runRows[0]?.classList.contains('hidden');
     setExpanded(expanding);
-    const shas = expandedShas();
+    const shas = new Set(location.hash.slice(1).split(',').filter(Boolean));
     expanding ? shas.add(c.short_sha) : shas.delete(c.short_sha);
-    pushHash(shas);
+    pushUrlState(shas);
     if (expanding) commitTr.scrollIntoView({ block: 'nearest' });
   });
 }
 
-// Restore expanded state from URL hash (including on back-navigation)
-function applyHash() {
-  const shas = expandedShas();
+// Restore all URL state (including on back/forward navigation)
+function applyUrlState() {
+  const { mode, runs, sec, bms, shas } = _parseUrlState();
+  chartMode = mode;
+  document.querySelectorAll('.mode-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.mode === mode));
+  runsMode = runs;
+  const runsSel = document.getElementById('runs-mode');
+  runsSel.value = runs;
+  if (runsSel.value !== runs) runsMode = 'latest'; // run index no longer exists
+  secondaryMetric = sec;
+  document.getElementById('secondary-mode').value = sec;
+  selectedBenchmarks.clear();
+  for (const b of bms) selectedBenchmarks.add(b);
+  _applyBenchmarkFilter(); // updates buttons, chart visibility, score cells
+  chartRenderers.forEach(r => r(chartMode, runsMode, secondaryMetric));
   for (const [sha, fn] of Object.entries(rowBySha)) fn(shas.has(sha));
   if (shas.size) {
     const first = document.getElementById('commit-' + [...shas][0]);
     if (first) first.scrollIntoView({ block: 'center' });
   }
 }
-applyHash();
-window.addEventListener('popstate', applyHash);
+applyUrlState();
+window.addEventListener('popstate', applyUrlState);
 {% endraw %}
 </script>
 </body>
