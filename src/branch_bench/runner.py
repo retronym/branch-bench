@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 import time
@@ -81,6 +82,24 @@ def _infer_event(fg: Path) -> str:
                 return f"{base}-forward"
             return base
     return "cpu"
+
+
+class _RunningLog:
+    """Writes tool output to a JS file the report can load via <script src>."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._f = path.open("w", encoding="utf-8")
+        self._f.write("window.__runLog=[];\n")
+        self._f.flush()
+
+    def append(self, msg: str) -> None:
+        entry = json.dumps({"ts": time.time(), "msg": msg})
+        self._f.write(f"window.__runLog.push({entry});\n")
+        self._f.flush()
+
+    def close(self) -> None:
+        self._f.close()
 
 
 def _make_tee(log: Callable[[str], None]) -> Callable[[str], None]:
@@ -231,7 +250,7 @@ def run_branch(
 ) -> None:
     repo_path = Path(cfg.repo.path).resolve()
     cfg.base_dir().mkdir(parents=True, exist_ok=True)
-    github_url = git.github_remote_url(repo_path)
+    github_url = git.github_remote_url(repo_path, cfg.repo.branch)
 
     if git.is_dirty(repo_path):
         log("[!] Working tree is dirty — stash or commit changes before running.")
@@ -341,9 +360,15 @@ def run_branch(
 
     epoch = store.current_epoch()
     report_path = cfg.report_path(epoch)
+    running_log: _RunningLog | None = None
     if live_report:
         generate(store, report_path, github_url=github_url)
         generate_index(cfg)
+        running_log = _RunningLog(report_path.parent / "running.js")
+        _orig_log = log
+        def log(msg: str) -> None:  # noqa: F811
+            _orig_log(msg)
+            running_log.append(msg)  # type: ignore[union-attr]
         log(f"Report: {report_path.resolve()}")
         log("(refresh after each commit completes)\n")
 
@@ -421,3 +446,6 @@ def run_branch(
     finally:
         log(f"Restoring {original_ref}...")
         git.restore(repo_path, original_ref)
+        if running_log:
+            running_log.close()
+            running_log._path.unlink(missing_ok=True)

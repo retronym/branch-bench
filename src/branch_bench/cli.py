@@ -24,6 +24,34 @@ def _find_config() -> Path:
     return p
 
 
+def _onboard(config_path: Path) -> None:
+    """Offer to write a starter config to .bench/bench.toml with setup instructions."""
+    template_path = Path(".bench") / "bench.toml"
+    click.echo(f"No {config_path} found in the current directory.")
+    if not click.confirm(f"Create a starter config at {template_path}?", default=True):
+        raise SystemExit(0)
+
+    template_path.parent.mkdir(parents=True, exist_ok=True)
+    fresh = not template_path.exists()
+    if fresh:
+        template_path.write_text(TEMPLATE, encoding="utf-8")
+        click.echo(f"Written to {template_path}.")
+    else:
+        click.echo(f"{template_path} already exists — not overwritten.")
+
+    click.echo(f"""
+Next steps:
+
+  1. Open {template_path}
+  2. Set [repo] → branch  to your feature branch name
+  3. Set [commands] → bench_cmd  to your JMH runner command
+       Use {{out}} for the JMH results file and {{out_dir}} for profiler output
+       Example: ./mill foo.jmh.run -- -rff {{out}} -wi 5 -i 5 -f 1
+  4. Move it:  mv {template_path} {config_path}
+  5. Run:      branch-bench run
+""")
+
+
 @click.group()
 def main() -> None:
     """branch-bench: verify, benchmark, and profile a git branch commit-by-commit."""
@@ -91,7 +119,11 @@ def run(
     verbose: int,
 ) -> None:
     """Walk commits on a branch, run tests and benchmarks, store results."""
-    cfg = load_config(Path(config))
+    config_path = Path(config)
+    if not config_path.exists() and config == CONFIG_FILE:
+        _onboard(config_path)
+        raise SystemExit(1)
+    cfg = load_config(config_path)
     store = Store(cfg.db_path(), epoch_override=epoch_override)
 
     try:
@@ -140,7 +172,7 @@ def _do_report(cfg, epoch_override: int | None = None, open_browser: bool = Fals
         backfilled = store.backfill_by_tree_sha()
         if backfilled:
             click.echo(f"  Backfilled {backfilled} commit(s) via tree-SHA reuse")
-        github_url = git.github_remote_url(repo_path)
+        github_url = git.github_remote_url(repo_path, cfg.repo.branch)
         epoch = store.current_epoch()
         out = cfg.report_path(epoch)
         generate(store, out, github_url=github_url)
@@ -280,7 +312,7 @@ def migrate(config: str, from_db: str | None) -> None:
         click.echo(f"  Copied {copied} file(s), skipped {skipped} already-migrated.")
 
         # Regenerate reports for all epochs
-        github_url = git.github_remote_url(Path(cfg.repo.path).resolve())
+        github_url = git.github_remote_url(Path(cfg.repo.path).resolve(), cfg.repo.branch)
         for ep in store.all_epochs():
             ep_store = Store(cfg.db_path(), epoch_override=ep)
             try:

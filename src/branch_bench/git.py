@@ -68,10 +68,11 @@ def list_commits(repo: Path, branch: str, max_count: int | None = None, exclude_
     return list(reversed(commits))
 
 
-def github_remote_url(repo: Path) -> str | None:
-    """Return the base GitHub HTTPS URL for this repo (e.g. https://github.com/owner/repo),
-    inferred from the first github.com remote, preferring 'origin'.
-    Returns None if no github.com remote is found.
+def github_remote_url(repo: Path, branch: str | None = None) -> str | None:
+    """Return the base GitHub HTTPS URL for this repo (e.g. https://github.com/owner/repo).
+
+    Priority: (1) the remote that tracks *branch* (or the current branch), (2) 'origin',
+    (3) any other github.com remote.  Returns None if no github.com remote is found.
     """
     import re
     try:
@@ -91,6 +92,18 @@ def github_remote_url(repo: Path) -> str | None:
         m = re.search(r"github\.com[:/](.+?)(?:\.git)?$", url)
         if m:
             candidates.setdefault(name, f"https://github.com/{m.group(1)}")
+
+    if not candidates:
+        return None
+
+    # Prefer the tracking remote of the configured (or current) branch
+    try:
+        effective_branch = branch or current_ref(repo)
+        tracking = _run(["git", "config", f"branch.{effective_branch}.remote"], repo)
+        if tracking in candidates:
+            return candidates[tracking]
+    except subprocess.CalledProcessError:
+        pass
 
     return candidates.get("origin") or next(iter(candidates.values()), None)
 
@@ -127,6 +140,9 @@ def expand_range(repo: Path, range_spec: str) -> list[str]:
 
 
 def checkout(repo: Path, sha: str) -> None:
+    """Checkout *sha*; skips if HEAD is already there (avoids needless detached-HEAD state)."""
+    if rev_parse(repo, "HEAD") == sha:
+        return
     subprocess.run(["git", "checkout", "--quiet", sha], cwd=repo, check=True)
 
 
