@@ -110,6 +110,23 @@ def _make_tee(log: Callable[[str], None]) -> Callable[[str], None]:
     return tee
 
 
+def _collect_artifacts(
+    artifacts: list[Path],
+    run_dir: Path,
+    run_id: int,
+    store: Store,
+    log: Callable[[str], None],
+) -> None:
+    """Move artifact files into run_dir, infer event type, and persist to store."""
+    for artifact in artifacts:
+        dest = run_dir / artifact.name
+        shutil.move(str(artifact), dest)
+        event = _infer_event(dest)
+        rel = _try_relative(dest)
+        store.save_profile(run_id, event, str(rel))
+        log(f"  Profile: {dest.name}")
+
+
 def run_commit(
     commit: Commit,
     cfg: Config,
@@ -117,43 +134,49 @@ def run_commit(
     repo_path: Path,
     run_tests: bool,
     run_benchmarks: bool,
+    run_profile_cmd: bool,
     log: Callable[[str], None],
     verbose: int = 0,
 ) -> bool:
-    """Run tests and benchmarks for one commit. Returns True if both succeeded.
+    """Run tests, benchmarks, and/or profiling for one commit.
 
-    *verbose* controls live streaming of subprocess output:
-      0 — silent (buffered, shown only on failure via the stored output)
-      1 — stream bench command output as it runs
-      2 — stream both test and bench command output
+    Returns True if required steps succeeded (or were skipped).
+
+    *run_profile_cmd* — when True and ``cfg.commands.profile_cmd`` is set,
+    a separate profile run (source='profile') is executed after bench.
+    Secondary metrics are NOT collected from the profile run.
     """
     log(f"  Checking out {commit.short_sha}: {commit.message[:60]}")
     git.checkout(repo_path, commit.sha)
 
-    run_id = store.create_run(
+    epoch = store.current_epoch()
+
+    # ── Test ──────────────────────────────────────────────────────────────────
+    bench_run_id = store.create_run(
         commit_sha=commit.sha,
         bench_cmd=cfg.commands.bench_cmd or None,
         test_cmd=cfg.commands.test_cmd or None,
+        source="bench",
     )
 
     if run_tests and cfg.commands.test_cmd:
         log(f"  $ {cfg.commands.test_cmd}")
         test_tee = _make_tee(log) if verbose >= 2 else None
         result = commands.run_test(cfg.commands.test_cmd, repo_path, tee=test_tee)
-        store.save_test_run(run_id, result)
+        store.save_test_run(bench_run_id, result)
         status = "PASS" if result.passed else "FAIL"
         log(f"  Tests: {status} ({result.duration_seconds:.1f}s)")
         if not result.passed:
             log("  [!] Tests failed — skipping benchmarks for this commit")
             return False
 
+    # ── Bench ─────────────────────────────────────────────────────────────────
     if run_benchmarks and cfg.commands.bench_cmd:
         resolved_cmd = cfg.commands.bench_cmd.replace("{out}", "<jmh-results.json>").replace("{out_dir}", "<profiles-dir>")
         log(f"  $ {resolved_cmd}")
         bench_tee = _make_tee(log) if verbose >= 1 else None
-        epoch = store.current_epoch()
-        run_number = store.run_number_for_id(run_id)
-        run_dir = cfg.run_assets_dir(epoch, commit.short_sha, commit.message, run_number)
+        run_number = store.run_number_for_id(bench_run_id)
+        run_dir = cfg.run_assets_dir(epoch, commit.short_sha, commit.message, run_number, "bench")
         run_dir.mkdir(parents=True, exist_ok=True)
         try:
             bench_results, artifacts, bench_output, saved_json = commands.run_bench(
@@ -163,29 +186,156 @@ def run_commit(
                 jmh_save_name="jmh-results",
                 tee=bench_tee,
             )
-            store.save_bench_output(run_id, bench_output)
+            store.save_bench_output(bench_run_id, bench_output)
             if saved_json:
                 rel = _try_relative(saved_json)
-                store.save_jmh_json_path(run_id, str(rel))
-            store.save_benchmark_results(run_id, bench_results)
+                store.save_jmh_json_path(bench_run_id, str(rel))
+            store.save_benchmark_results(bench_run_id, bench_results)
             log(f"  Benchmarks: {len(bench_results)} result(s)")
+            _collect_artifacts(artifacts, run_dir, bench_run_id, store, log)
 
-            for artifact in artifacts:
-                dest = run_dir / artifact.name
-                shutil.move(str(artifact), dest)
-                event = _infer_event(dest)
-                rel = _try_relative(dest)
-                store.save_profile(run_id, event, str(rel))
-                log(f"  Profile: {dest.name}")
-
-            return len(bench_results) > 0
+            if not bench_results:
+                return False
         except RuntimeError as e:
             raw = e.args[1] if len(e.args) > 1 else ""
-            store.save_bench_output(run_id, raw)
+            store.save_bench_output(bench_run_id, raw)
             log(f"  [!] Benchmark error: {e.args[0]}")
             return False
 
+    # ── Profile ───────────────────────────────────────────────────────────────
+    if run_profile_cmd and cfg.commands.profile_cmd:
+        _run_profile_for_commit(commit, cfg, store, repo_path, epoch, log, verbose)
+
     return True
+
+
+def _run_profile_for_commit(
+    commit: Commit,
+    cfg: Config,
+    store: Store,
+    repo_path: Path,
+    epoch: int,
+    log: Callable[[str], None],
+    verbose: int = 0,
+) -> None:
+    """Execute profile_cmd for a commit and store the resulting artifacts."""
+    resolved_cmd = cfg.commands.profile_cmd.replace("{out}", "<profile.json>").replace("{out_dir}", "<profiles-dir>")
+    log(f"  [profile] $ {resolved_cmd}")
+    profile_tee = _make_tee(log) if verbose >= 1 else None
+
+    profile_run_id = store.create_run(
+        commit_sha=commit.sha,
+        bench_cmd=cfg.commands.profile_cmd or None,
+        test_cmd=None,
+        source="profile",
+    )
+    run_number = store.run_number_for_id(profile_run_id)
+    run_dir = cfg.run_assets_dir(epoch, commit.short_sha, commit.message, run_number, "profile")
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        artifacts, raw_output = commands.run_profile(
+            cfg.commands.profile_cmd,
+            repo_path,
+            tee=profile_tee,
+        )
+        store.save_bench_output(profile_run_id, raw_output)
+        _collect_artifacts(artifacts, run_dir, profile_run_id, store, log)
+        log(f"  [profile] {len(artifacts)} artifact(s)")
+    except RuntimeError as e:
+        raw = e.args[1] if len(e.args) > 1 else ""
+        store.save_bench_output(profile_run_id, raw)
+        log(f"  [!] Profile error: {e.args[0]}")
+
+
+def diff_pair(
+    left_sha: str,
+    left_short_sha: str,
+    left_message: str,
+    right_commit: Commit,
+    diff_vs: str,
+    cfg: Config,
+    store: Store,
+    repo_path: Path,
+    epoch: int,
+    branch: str,
+    log: Callable[[str], None],
+) -> None:
+    """Run configured diff tools between two commits' best available profiles.
+
+    *diff_vs* is stored verbatim ('previous' or 'branch-base') to label the
+    relationship in the UI.
+    """
+    if not cfg.diff.commands:
+        return
+
+    left_profiles = store.best_profiles_for_commit(left_sha)
+    right_profiles = store.best_profiles_for_commit(right_commit.sha)
+
+    if not left_profiles or not right_profiles:
+        log(
+            f"  [diff] No profiles for {left_short_sha[:8]}…{right_commit.short_sha} — skipping"
+        )
+        return
+
+    # Index right profiles by file extension
+    right_by_ext: dict[str, list[dict]] = {}
+    for p in right_profiles:
+        ext = Path(p["file_path"]).suffix.lstrip(".")
+        right_by_ext.setdefault(ext, []).append(p)
+
+    ran = 0
+    for left_p in left_profiles:
+        left_file = Path(left_p["file_path"])
+        ext = left_file.suffix.lstrip(".")
+        diff_cmd = cfg.diff.commands.get(ext)
+        if not diff_cmd or ext not in right_by_ext:
+            continue
+
+        for right_p in right_by_ext[ext]:
+            right_file = Path(right_p["file_path"])
+
+            # Skip if already computed (idempotent re-runs)
+            if store.diff_exists(epoch, left_sha, right_commit.sha, diff_vs, ext):
+                log(f"  [diff] {left_short_sha[:8]}…{right_commit.short_sha} ({ext}) — cached")
+                continue
+
+            artifact_stem = left_file.stem
+            out_dir = cfg.diff_assets_dir(
+                epoch, left_short_sha[:8], right_commit.short_sha, artifact_stem
+            )
+
+            try:
+                output_files, _ = commands.run_diff_tool(
+                    diff_cmd,
+                    left_file=left_file.resolve(),
+                    left_sha=left_sha,
+                    left_commit_msg=left_message,
+                    left_branch=branch,
+                    right_file=right_file.resolve(),
+                    right_sha=right_commit.sha,
+                    right_commit_msg=right_commit.message,
+                    right_branch=branch,
+                    out_dir=out_dir,
+                    cwd=repo_path,
+                )
+                for f in output_files:
+                    rel = _try_relative(f)
+                    store.save_diff(
+                        epoch=epoch,
+                        left_sha=left_sha,
+                        right_sha=right_commit.sha,
+                        diff_vs=diff_vs,
+                        source_ext=ext,
+                        diff_path=str(rel),
+                    )
+                    log(f"  [diff] → {f.name}")
+                ran += 1
+            except RuntimeError as e:
+                log(f"  [!] Diff failed ({left_short_sha[:8]}…{right_commit.short_sha}): {e.args[0]}")
+
+    if ran == 0 and left_profiles and right_profiles:
+        log(f"  [diff] No matching extensions for {left_short_sha[:8]}…{right_commit.short_sha}")
 
 
 def _resolve_ref(repo_path: Path, ref: str, flag: str, log: Callable[[str], None]) -> str | None:
@@ -202,12 +352,7 @@ def _expand_refs(
     flag: str,
     log: Callable[[str], None],
 ) -> list[str] | None:
-    """Expand a mix of git refs and range specs to a deduplicated list of full SHAs.
-
-    Range specs (containing '..') are expanded via ``git log``; individual refs
-    are resolved with ``git rev-parse``.  Returns None if any ref fails to resolve
-    so callers can abort cleanly.
-    """
+    """Expand a mix of git refs and range specs to a deduplicated list of full SHAs."""
     shas: list[str] = []
     seen: set[str] = set()
     ok = True
@@ -232,6 +377,57 @@ def _expand_refs(
     return shas if ok else None
 
 
+def _resolve_diff_vs(
+    diff_vs: tuple[str, ...],
+    repo_path: Path,
+    log: Callable[[str], None],
+) -> tuple[str, ...]:
+    """Resolve non-'previous' entries in *diff_vs* to full SHAs.
+
+    Unresolvable refs are logged and dropped so the rest of the run continues.
+    """
+    resolved: list[str] = []
+    for v in diff_vs:
+        if v == "previous":
+            resolved.append(v)
+        else:
+            sha = git.rev_parse(repo_path, v)
+            if sha is None:
+                log(f"  [!] --diff-vs {v!r}: not a valid git ref — skipping")
+            else:
+                resolved.append(sha)
+    return tuple(resolved)
+
+
+def _ensure_merge_base_profiled(
+    merge_base: str,
+    cfg: Config,
+    store: Store,
+    repo_path: Path,
+    epoch: int,
+    log: Callable[[str], None],
+    verbose: int = 0,
+) -> None:
+    """Check out merge-base and run profile_cmd if not already profiled."""
+    if store.has_profile_runs(merge_base):
+        log(f"  Merge-base {merge_base[:8]} already profiled — reusing")
+        return
+
+    log(f"  Profiling merge-base {merge_base[:8]}…")
+    git.checkout(repo_path, merge_base)
+
+    # Use a synthetic Commit-like object (merge-base may not be in commits table)
+    short = merge_base[:8]
+    synthetic = Commit(
+        sha=merge_base,
+        short_sha=short,
+        author="",
+        timestamp=0,
+        message="(merge-base)",
+    )
+    _run_profile_for_commit(synthetic, cfg, store, repo_path, epoch, log, verbose)
+
+
 def run_branch(
     cfg: Config,
     store: Store,
@@ -243,11 +439,21 @@ def run_branch(
     strategy: str = "bisect",
     run_tests: bool = True,
     run_benchmarks: bool = True,
+    run_profile_cmd: bool = True,
+    run_diff: bool = False,
+    diff_vs: tuple[str, ...] = ("previous",),
     skip_existing: bool = True,
     live_report: bool = True,
     verbose: int = 0,
     log: Callable[[str], None] = lambda s: print(s, file=sys.stderr),
 ) -> None:
+    """Walk commits on a branch, run tests/benchmarks/profiling, store results.
+
+    *run_profile_cmd* — also run profile_cmd (when configured) for each commit.
+    *run_diff* — run configured diff tools after each commit (linear strategy only;
+                 silently skipped for bisect).
+    *diff_vs* — tuple of targets: 'previous' and/or full SHAs to diff against.
+    """
     repo_path = Path(cfg.repo.path).resolve()
     cfg.base_dir().mkdir(parents=True, exist_ok=True)
     github_url = git.github_remote_url(repo_path, cfg.repo.branch)
@@ -259,7 +465,7 @@ def run_branch(
     original_ref = git.current_ref(repo_path)
     log(f"Current ref: {original_ref}")
 
-    # ── Resolve all user-supplied refs to full SHAs now, before any git checkout ──
+    # ── Resolve all user-supplied refs to full SHAs before any checkout ──────
     from_sha: str | None = None
     if from_ref:
         from_sha = _resolve_ref(repo_path, from_ref, "--from", log)
@@ -295,7 +501,6 @@ def run_branch(
                 return i
         return None
 
-    # Determine the run range (from/to slicing) — separate from the full list
     run_range = all_commits
     if from_sha:
         idx = _find(from_sha, run_range)
@@ -316,8 +521,6 @@ def run_branch(
 
     log(f"Found {len(run_range)} commit(s) on branch '{cfg.repo.branch}'")
 
-    # Persist ALL commits with absolute positions so the report order is always correct.
-    # Using all_commits (not the sliced run_range) prevents --from from corrupting positions.
     for i, commit in enumerate(all_commits):
         store.save_commit(
             sha=commit.sha,
@@ -330,8 +533,6 @@ def run_branch(
             tree_sha=commit.tree_sha,
         )
 
-    # Retire commits left over from a previous branch incarnation (e.g. after rebase).
-    # Only safe when we have a complete, unfiltered view of the branch.
     if not from_sha and not to_sha and max_commits is None:
         current_shas = {c.sha for c in all_commits}
         retired = store.retire_stale_commits(current_shas)
@@ -342,7 +543,6 @@ def run_branch(
     if backfilled:
         log(f"  Backfilled {backfilled} commit(s) via tree-SHA reuse")
 
-    # --sha: restrict the run loop to specific commits (saves/retires still use the full list)
     run_commits = run_range
     if resolved_targets:
         seen_shas: set[str] = set()
@@ -372,6 +572,9 @@ def run_branch(
         log(f"Report: {report_path.resolve()}")
         log("(refresh after each commit completes)\n")
 
+    # Resolve any SHA-based diff targets to full SHAs upfront
+    resolved_diff_vs = _resolve_diff_vs(diff_vs, repo_path, log) if run_diff else diff_vs
+
     indices = bisect_order(len(run_commits)) if strategy == "bisect" else list(range(len(run_commits)))
 
     runs_done: int = 0
@@ -385,16 +588,12 @@ def run_branch(
         return f" — ETA ~{_format_eta(avg * remaining)}"
 
     try:
-        first_run = True  # tracks the first commit we actually execute (not skip)
+        first_run = True
         for pos, idx in enumerate(indices):
             commit = run_commits[idx]
 
             if skip_existing and store.has_runs(commit.sha, run_benchmarks=run_benchmarks, run_tests=run_tests):
                 log(f"  Skipping {commit.short_sha} (already has runs — use --all to re-run)")
-                # Note: existing runs shadow tree-SHA matches from newer re-benches on rebased
-                # counterparts. If you rebased, re-benched, then reverted, this commit will show
-                # its pre-rebase results. Use --sha <sha> --all to add a fresh run, then switch
-                # to Aggregate mode in the report, or run `branch-bench epoch` for a clean slate.
                 continue
 
             if skip_existing and commit.tree_sha:
@@ -425,11 +624,27 @@ def run_branch(
                 repo_path=repo_path,
                 run_tests=run_tests,
                 run_benchmarks=run_benchmarks,
+                run_profile_cmd=run_profile_cmd,
                 log=log,
                 verbose=verbose,
             )
             run_time_total += time.monotonic() - _run_start
             runs_done += 1
+
+            # Inline diffs after each commit (linear strategy only)
+            if run_diff and strategy == "linear" and ok:
+                _run_inline_diffs(
+                    commit=commit,
+                    idx=idx,
+                    run_commits=run_commits,
+                    diff_vs=resolved_diff_vs,
+                    cfg=cfg,
+                    store=store,
+                    repo_path=repo_path,
+                    epoch=epoch,
+                    log=log,
+                )
+
             if live_report:
                 generate(store, report_path, github_url=github_url)
                 generate_index(cfg)
@@ -449,3 +664,263 @@ def run_branch(
         if running_log:
             running_log.close()
             running_log._path.unlink(missing_ok=True)
+
+
+def _run_inline_diffs(
+    commit: Commit,
+    idx: int,
+    run_commits: list[Commit],
+    diff_vs: tuple[str, ...],
+    cfg: Config,
+    store: Store,
+    repo_path: Path,
+    epoch: int,
+    log: Callable[[str], None],
+) -> None:
+    """Run diffs after a commit in a linear walk.
+
+    *diff_vs* is a tuple of targets:
+      'previous'  — diff vs the preceding commit in the walk
+      <full SHA>  — diff vs that fixed commit (resolved upstream)
+    """
+    diff_vs_set = set(diff_vs)
+
+    if "previous" in diff_vs_set and idx > 0:
+        prev = run_commits[idx - 1]
+        diff_pair(
+            left_sha=prev.sha,
+            left_short_sha=prev.short_sha,
+            left_message=prev.message,
+            right_commit=commit,
+            diff_vs="previous",
+            cfg=cfg,
+            store=store,
+            repo_path=repo_path,
+            epoch=epoch,
+            branch=cfg.repo.branch,
+            log=log,
+        )
+
+    for sha_base in diff_vs_set - {"previous"}:
+        info = store.commit_info(sha_base)
+        left_sha = info["sha"] if info else sha_base
+        left_short = info["short_sha"] if info else sha_base[:8]
+        left_message = info["message"] if info else "(unknown)"
+        diff_pair(
+            left_sha=left_sha,
+            left_short_sha=left_short,
+            left_message=left_message,
+            right_commit=commit,
+            diff_vs=sha_base[:8],
+            cfg=cfg,
+            store=store,
+            repo_path=repo_path,
+            epoch=epoch,
+            branch=cfg.repo.branch,
+            log=log,
+        )
+
+
+def profile_branch(
+    cfg: Config,
+    store: Store,
+    *,
+    max_commits: int | None = None,
+    from_ref: str | None = None,
+    to_ref: str | None = None,
+    target_refs: tuple[str, ...] = (),
+    run_diff: bool = False,
+    diff_vs: tuple[str, ...] = ("previous",),
+    skip_existing: bool = True,
+    live_report: bool = True,
+    verbose: int = 0,
+    log: Callable[[str], None] = lambda s: print(s, file=sys.stderr),
+) -> None:
+    """Walk branch commits running only profile_cmd — no bench, no tests."""
+    if not cfg.commands.profile_cmd:
+        log("[!] profile_cmd is not set in [commands] — nothing to do.")
+        return
+
+    repo_path = Path(cfg.repo.path).resolve()
+    cfg.base_dir().mkdir(parents=True, exist_ok=True)
+    github_url = git.github_remote_url(repo_path, cfg.repo.branch)
+
+    if git.is_dirty(repo_path):
+        log("[!] Working tree is dirty — stash or commit changes before running.")
+        return
+
+    original_ref = git.current_ref(repo_path)
+    log(f"Current ref: {original_ref}")
+
+    from_sha: str | None = None
+    if from_ref:
+        from_sha = _resolve_ref(repo_path, from_ref, "--from", log)
+        if from_sha is None:
+            return
+
+    to_sha: str | None = None
+    if to_ref:
+        to_sha = _resolve_ref(repo_path, to_ref, "--to", log)
+        if to_sha is None:
+            return
+
+    resolved_targets: list[str] = []
+    if target_refs:
+        result = _expand_refs(repo_path, target_refs, "--sha", log)
+        if result is None:
+            return
+        resolved_targets = result
+
+    merge_base = git.find_merge_base(repo_path, cfg.repo.branch)
+    if merge_base:
+        log(f"Merge base: {merge_base[:8]}")
+    all_commits = git.list_commits(repo_path, cfg.repo.branch, max_count=max_commits, exclude_before=merge_base)
+
+    def _find(sha: str, lst: list) -> int | None:
+        for i, c in enumerate(lst):
+            if c.sha == sha or c.sha.startswith(sha) or c.short_sha.startswith(sha):
+                return i
+        return None
+
+    run_range = all_commits
+    if from_sha:
+        idx = _find(from_sha, run_range)
+        if idx is None:
+            log(f"[!] --from not found on branch — aborting.")
+            return
+        run_range = run_range[idx:]
+    if to_sha:
+        idx = _find(to_sha, run_range)
+        if idx is None:
+            log(f"[!] --to not found on branch — aborting.")
+            return
+        run_range = run_range[: idx + 1]
+
+    if not run_range:
+        log("No commits found.")
+        return
+
+    # Persist commits so they show in the report
+    for i, commit in enumerate(all_commits):
+        store.save_commit(
+            sha=commit.sha,
+            short_sha=commit.short_sha,
+            message=commit.message,
+            author=commit.author,
+            timestamp=commit.timestamp,
+            branch=cfg.repo.branch,
+            position=i,
+            tree_sha=commit.tree_sha,
+        )
+
+    run_commits = run_range
+    if resolved_targets:
+        seen_shas: set[str] = set()
+        run_commits = []
+        for sha in resolved_targets:
+            idx = _find(sha, all_commits)
+            if idx is not None and all_commits[idx].sha not in seen_shas:
+                seen_shas.add(all_commits[idx].sha)
+                run_commits.append(all_commits[idx])
+
+    log(f"Found {len(run_commits)} commit(s) to profile")
+
+    epoch = store.current_epoch()
+    report_path = cfg.report_path(epoch)
+
+    # Resolve any SHA-based diff targets upfront
+    resolved_diff_vs = _resolve_diff_vs(diff_vs, repo_path, log) if run_diff else diff_vs
+
+    try:
+        for list_idx, commit in enumerate(run_commits):
+            if skip_existing and store.has_profile_runs(commit.sha):
+                log(f"  Skipping {commit.short_sha} (already profiled — use --all to re-run)")
+                continue
+
+            log(f"[{list_idx+1}/{len(run_commits)}] {commit.short_sha} {commit.message[:50]}")
+            git.checkout(repo_path, commit.sha)
+            _run_profile_for_commit(commit, cfg, store, repo_path, epoch, log, verbose)
+
+            if run_diff:
+                _run_inline_diffs(
+                    commit=commit,
+                    idx=list_idx,
+                    run_commits=run_commits,
+                    diff_vs=resolved_diff_vs,
+                    cfg=cfg,
+                    store=store,
+                    repo_path=repo_path,
+                    epoch=epoch,
+                    log=log,
+                )
+
+        if live_report:
+            generate(store, report_path, github_url=github_url)
+            generate_index(cfg)
+            log(f"Report: {report_path.resolve()}")
+    except KeyboardInterrupt:
+        log("\n[!] Interrupted.")
+    finally:
+        log(f"Restoring {original_ref}...")
+        git.restore(repo_path, original_ref)
+
+
+def diff_range(
+    cfg: Config,
+    store: Store,
+    commits: list[Commit],
+    diff_vs: tuple[str, ...],
+    repo_path: Path,
+    epoch: int,
+    log: Callable[[str], None],
+) -> None:
+    """Run AOT diffs over an ordered list of commits.
+
+    *diff_vs* is a tuple of targets:
+      'previous'  — each commit vs its predecessor in *commits*
+      <full SHA>  — each commit vs that fixed commit
+    """
+    if not cfg.diff.commands:
+        log("[!] No [diff] commands configured — nothing to diff.")
+        return
+
+    resolved = _resolve_diff_vs(diff_vs, repo_path, log)
+    diff_vs_set = set(resolved)
+
+    for i, commit in enumerate(commits):
+        if "previous" in diff_vs_set and i > 0:
+            prev = commits[i - 1]
+            log(f"[{i}/{len(commits)-1}] Diffing {prev.short_sha}…{commit.short_sha} (vs previous)")
+            diff_pair(
+                left_sha=prev.sha,
+                left_short_sha=prev.short_sha,
+                left_message=prev.message,
+                right_commit=commit,
+                diff_vs="previous",
+                cfg=cfg,
+                store=store,
+                repo_path=repo_path,
+                epoch=epoch,
+                branch=cfg.repo.branch,
+                log=log,
+            )
+
+        for sha_base in diff_vs_set - {"previous"}:
+            info = store.commit_info(sha_base)
+            left_sha = info["sha"] if info else sha_base
+            left_short = info["short_sha"] if info else sha_base[:8]
+            left_message = info["message"] if info else "(unknown)"
+            log(f"[{i+1}/{len(commits)}] Diffing {left_short}…{commit.short_sha} (vs {left_short})")
+            diff_pair(
+                left_sha=left_sha,
+                left_short_sha=left_short,
+                left_message=left_message,
+                right_commit=commit,
+                diff_vs=sha_base[:8],
+                cfg=cfg,
+                store=store,
+                repo_path=repo_path,
+                epoch=epoch,
+                branch=cfg.repo.branch,
+                log=log,
+            )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import shutil
 import subprocess
 import tempfile
@@ -16,22 +17,26 @@ def _run_cmd(
     cmd: str,
     cwd: Path,
     tee: Callable[[str], None] | None = None,
+    env: dict | None = None,
 ) -> tuple[int, str]:
     """Run *cmd* in *cwd*, return (returncode, combined_output).
+
+    *env* replaces the process environment entirely when given; pass
+    ``{**os.environ, ...}`` to extend rather than replace.
 
     When *tee* is provided the command's stdout and stderr are merged and each
     line is passed to *tee* as it arrives (useful for live progress display).
     The same text is always accumulated and returned as the second value.
     """
     if tee is None:
-        result = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True)
+        result = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True, env=env)
         return result.returncode, result.stdout + result.stderr
 
     # Streaming mode: merge stderr into stdout, tee each line in real time.
     proc = subprocess.Popen(
         cmd, shell=True, cwd=cwd,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1,
+        text=True, bufsize=1, env=env,
     )
     lines: list[str] = []
     assert proc.stdout is not None
@@ -104,6 +109,95 @@ def run_bench(
             kept.append(dest)
 
     return bench_results, kept, raw_output, saved_json
+
+
+def run_profile(
+    profile_cmd: str,
+    cwd: Path,
+    tee: Callable[[str], None] | None = None,
+) -> tuple[list[Path], str]:
+    """Run profile_cmd, return (artifact_paths, raw_output).
+
+    Substitutions available in profile_cmd:
+      {out}     — temp file path (available if command also emits JMH JSON, ignored otherwise)
+      {out_dir} — temp directory for profiler output (flamegraphs, JFR files, …)
+    All files written to {out_dir} are collected.
+    Unlike run_bench, no JMH JSON is parsed and no benchmark results are stored.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+        out_path = Path(f.name)
+
+    with tempfile.TemporaryDirectory() as out_dir:
+        out_dir_path = Path(out_dir)
+
+        cmd = profile_cmd.replace("{out}", str(out_path)).replace("{out_dir}", str(out_dir_path))
+        returncode, raw_output = _run_cmd(cmd, cwd, tee=tee)
+
+        if returncode != 0:
+            raise RuntimeError(
+                f"Profile command failed (exit {returncode}):\n{raw_output}",
+                raw_output,
+            )
+
+        artifacts = sorted(p for p in out_dir_path.rglob("*") if p.is_file())
+        kept: list[Path] = []
+        for artifact in artifacts:
+            dest = out_path.parent / artifact.name
+            shutil.copy2(artifact, dest)
+            kept.append(dest)
+
+    return kept, raw_output
+
+
+def run_diff_tool(
+    diff_cmd: str,
+    *,
+    left_file: Path,
+    left_sha: str,
+    left_commit_msg: str,
+    left_branch: str,
+    right_file: Path,
+    right_sha: str,
+    right_commit_msg: str,
+    right_branch: str,
+    out_dir: Path,
+    cwd: Path,
+) -> tuple[list[Path], str]:
+    """Run a configured diff command and collect its output files.
+
+    Environment variables passed to the command:
+      LEFT_FILE, LEFT_SHA, LEFT_COMMIT_MSG, LEFT_BRANCH
+      RIGHT_FILE, RIGHT_SHA, RIGHT_COMMIT_MSG, RIGHT_BRANCH
+      OUT_DIR
+
+    The tool may write 0-N files of any name/extension to OUT_DIR.
+    Returns (output_files, raw_output).  Raises RuntimeError on non-zero exit.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    env = {
+        **os.environ,
+        "LEFT_FILE": str(left_file),
+        "LEFT_SHA": left_sha,
+        "LEFT_COMMIT_MSG": left_commit_msg,
+        "LEFT_BRANCH": left_branch,
+        "RIGHT_FILE": str(right_file),
+        "RIGHT_SHA": right_sha,
+        "RIGHT_COMMIT_MSG": right_commit_msg,
+        "RIGHT_BRANCH": right_branch,
+        "OUT_DIR": str(out_dir),
+    }
+    returncode, raw_output = _run_cmd(diff_cmd, cwd, env=env)
+    if returncode != 0:
+        var_names = ["LEFT_FILE", "LEFT_SHA", "LEFT_COMMIT_MSG", "LEFT_BRANCH",
+                     "RIGHT_FILE", "RIGHT_SHA", "RIGHT_COMMIT_MSG", "RIGHT_BRANCH", "OUT_DIR"]
+        exports = "; ".join(f'export {k}={env[k]!r}' for k in var_names)
+        repro = f"(set -x; {exports}; {diff_cmd})"
+        raise RuntimeError(
+            f"Diff command failed (exit {returncode}):\n{repro}\n{raw_output}",
+            raw_output,
+        )
+    output_files = sorted(p for p in out_dir.rglob("*") if p.is_file())
+    return output_files, raw_output
 
 
 def parse_jmh_json(path: Path) -> list[BenchmarkResult]:

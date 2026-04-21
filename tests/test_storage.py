@@ -22,7 +22,6 @@ def test_create_run():
     store.save_commit("abc123", "abc123"[:8], "msg", "a@b.com", 1700000000, "main")
     run_id = store.create_run("abc123", bench_cmd="./mill foo.jmh.run", test_cmd="./mill foo.test")
     assert isinstance(run_id, int)
-    # has_runs with defaults (run_benchmarks=True) requires benchmark_results rows
     assert not store.has_runs("abc123")
     store.save_benchmark_results(run_id, [BenchmarkResult("bench.M.run", "avgt", 1.0, None, "ns/op")])
     assert store.has_runs("abc123")
@@ -32,6 +31,104 @@ def test_create_run():
     assert len(runs) == 1
     assert runs[0]["bench_cmd"] == "./mill foo.jmh.run"
     assert runs[0]["test_cmd"] == "./mill foo.test"
+    assert runs[0]["source"] == "bench"
+
+
+def test_run_source_column():
+    store = make_store()
+    store.save_commit("abc123", "abc123"[:8], "msg", "a@b.com", 1700000000, "main")
+    bench_id = store.create_run("abc123", bench_cmd="./bench.sh", test_cmd=None, source="bench")
+    profile_id = store.create_run("abc123", bench_cmd="./profile.sh", test_cmd=None, source="profile")
+
+    runs = store.runs_for_commit("abc123")
+    sources = {r["source"] for r in runs}
+    assert sources == {"bench", "profile"}
+
+    # run_number_for_id counts within the same source
+    assert store.run_number_for_id(bench_id) == 1
+    assert store.run_number_for_id(profile_id) == 1
+
+    # A second profile run gets number 2
+    profile_id2 = store.create_run("abc123", bench_cmd="./profile.sh", test_cmd=None, source="profile")
+    assert store.run_number_for_id(profile_id2) == 2
+
+
+def test_has_profile_runs():
+    store = make_store()
+    store.save_commit("abc123", "abc123"[:8], "msg", "a@b.com", 1700000000, "main")
+    assert not store.has_profile_runs("abc123")
+
+    profile_id = store.create_run("abc123", bench_cmd="./profile.sh", test_cmd=None, source="profile")
+    # No artifacts yet — has_profile_runs checks for profiles rows
+    assert not store.has_profile_runs("abc123")
+
+    store.save_profile(profile_id, "cpu-forward", "epoch-1/assets/abc12345/profile/run-1/cpu.svg")
+    assert store.has_profile_runs("abc123")
+
+
+def test_best_profiles_for_commit_prefers_profile_source():
+    store = make_store()
+    store.save_commit("abc123", "abc123"[:8], "msg", "a@b.com", 1700000000, "main")
+
+    bench_id = store.create_run("abc123", bench_cmd="./bench.sh", test_cmd=None, source="bench")
+    store.save_profile(bench_id, "cpu-forward", "bench/cpu.svg")
+
+    profile_id = store.create_run("abc123", bench_cmd="./profile.sh", test_cmd=None, source="profile")
+    store.save_profile(profile_id, "cpu-forward", "profile/cpu.svg")
+
+    profiles = store.best_profiles_for_commit("abc123")
+    assert len(profiles) == 1
+    assert profiles[0]["file_path"] == "profile/cpu.svg"
+
+
+def test_best_profiles_falls_back_to_bench():
+    store = make_store()
+    store.save_commit("abc123", "abc123"[:8], "msg", "a@b.com", 1700000000, "main")
+
+    bench_id = store.create_run("abc123", bench_cmd="./bench.sh", test_cmd=None, source="bench")
+    store.save_profile(bench_id, "cpu-forward", "bench/cpu.svg")
+
+    profiles = store.best_profiles_for_commit("abc123")
+    assert profiles[0]["file_path"] == "bench/cpu.svg"
+
+
+def test_save_and_query_diff():
+    store = make_store()
+    store.save_commit("aaa", "aaa"[:8], "left", "a@b.com", 1700000000, "main")
+    store.save_commit("bbb", "bbb"[:8], "right", "a@b.com", 1700000001, "main")
+
+    epoch = store.current_epoch()
+    store.save_diff(epoch, "aaa", "bbb", "previous", "svg", "epoch-1/assets/diffs/aaa-bbb/cpu/diff.html")
+    store.save_diff(epoch, "aaa", "bbb", "previous", "svg", "epoch-1/assets/diffs/aaa-bbb/cpu/reverse-diff.html")
+
+    diffs = store.diffs_for_right_sha("bbb")
+    assert len(diffs) == 2
+    assert all(d["diff_vs"] == "previous" for d in diffs)
+    assert all(d["source_ext"] == "svg" for d in diffs)
+    names = {d["diff_path"].split("/")[-1] for d in diffs}
+    assert names == {"diff.html", "reverse-diff.html"}
+
+
+def test_diff_exists():
+    store = make_store()
+    epoch = store.current_epoch()
+    assert not store.diff_exists(epoch, "aaa", "bbb", "previous", "svg")
+
+    store.save_diff(epoch, "aaa", "bbb", "previous", "svg", "some/path.html")
+    assert store.diff_exists(epoch, "aaa", "bbb", "previous", "svg")
+    assert not store.diff_exists(epoch, "aaa", "bbb", "branch-base", "svg")
+
+
+def test_diffs_grouped_by_diff_vs():
+    store = make_store()
+    epoch = store.current_epoch()
+    store.save_diff(epoch, "base", "bbb", "branch-base", "svg", "epoch-1/diffs/base-bbb/cpu/diff.html")
+    store.save_diff(epoch, "aaa", "bbb", "previous", "svg", "epoch-1/diffs/aaa-bbb/cpu/diff.html")
+
+    diffs = store.diffs_for_right_sha("bbb")
+    assert len(diffs) == 2
+    vs_set = {d["diff_vs"] for d in diffs}
+    assert vs_set == {"branch-base", "previous"}
 
 
 def test_epoch_resets_has_runs():
@@ -43,9 +140,8 @@ def test_epoch_resets_has_runs():
 
     n = store.new_epoch()
     assert n == 2
-    assert not store.has_runs("abc123")  # new epoch — no runs yet
+    assert not store.has_runs("abc123")
 
-    # Old runs still accessible via direct run id (data preserved)
     runs_epoch1 = store._conn.execute(
         "SELECT id FROM runs WHERE commit_sha='abc123' AND epoch=1"
     ).fetchall()
@@ -89,3 +185,18 @@ def test_benchmark_names():
     names = store.all_benchmark_names()
     assert "com.Bench.run" in names
     assert "com.Bench.run2" in names
+
+
+def test_clone_run_copies_source():
+    store = make_store()
+    store.save_commit("aaa", "aaa"[:8], "left", "a@b.com", 1700000000, "main")
+    store.save_commit("bbb", "bbb"[:8], "right", "a@b.com", 1700000001, "main")
+
+    profile_id = store.create_run("aaa", bench_cmd="./p.sh", test_cmd=None, source="profile")
+    store.save_profile(profile_id, "cpu-forward", "aaa/cpu.svg")
+
+    new_id = store.clone_run(profile_id, "bbb", reused_from_sha="aaa"[:8])
+    runs = store.runs_for_commit("bbb")
+    assert runs[0]["source"] == "profile"
+    profiles = store.profiles_for(new_id)
+    assert profiles[0]["file_path"] == "aaa/cpu.svg"

@@ -102,16 +102,20 @@ def generate(store: Store, output_path: Path, github_url: str | None = None, nex
     commit_rows = []
     for commit in commits:
         runs = store.runs_for_commit(commit["sha"])
+
+        # Split runs by source for display
+        bench_runs = [r for r in runs if (r.get("source") or "bench") == "bench"]
+        profile_runs = [r for r in runs if (r.get("source") or "bench") == "profile"]
+
         commit_run_rows = []
 
-        for run_index, run in enumerate(runs):
+        for run_index, run in enumerate(bench_runs):
             run_id = run["id"]
             test = store.test_run_for(run_id)
             bench_results = store.benchmark_results_for(run_id)
             profiles = store.profiles_for(run_id)
 
             secondary_metrics = store.secondary_metrics_for(run_id)
-            # group by benchmark for easy lookup
             sec_by_bench: dict[str, dict] = {}
             for sm in secondary_metrics:
                 sec_by_bench.setdefault(sm["benchmark"], {})[sm["metric"]] = sm
@@ -121,7 +125,6 @@ def generate(store: Store, output_path: Path, github_url: str | None = None, nex
                 if bd is not None:
                     bd["unit"] = r["unit"]
                     bd["mode"] = r["mode"]
-                    # build secondary snapshot for this point
                     sec_snap: dict = {}
                     for metric, sm in sec_by_bench.get(r["benchmark"], {}).items():
                         bd["secUnits"][metric] = sm["unit"]
@@ -165,13 +168,52 @@ def generate(store: Store, output_path: Path, github_url: str | None = None, nex
                 ],
             })
 
-        # Summary from latest run for the commit-level row
+        # Profile runs: show as a distinct list of artifact-only entries
+        profile_run_rows = []
+        for run_index, run in enumerate(profile_runs):
+            run_id = run["id"]
+            profiles = store.profiles_for(run_id)
+            profile_run_rows.append({
+                "run_index": run_index + 1,
+                "run_at": _ts(run["run_at"]),
+                "profile_cmd": run.get("bench_cmd") or "",
+                "bench_output": run.get("bench_output") or "",
+                "profiles": [
+                    {"event": p["event"], "file_path": _rebase(p["file_path"], report_dir)}
+                    for p in profiles
+                ],
+            })
+
+        # Pre-computed diffs for this commit (as right side)
+        raw_diffs = store.diffs_for_right_sha(commit["sha"])
+        # Group by diff_vs, then list files with rebased paths
+        diffs_by_vs: dict[str, list[dict]] = {}
+        for d in raw_diffs:
+            entry = {**d, "diff_path": _rebase(d["diff_path"], report_dir)}
+            diffs_by_vs.setdefault(d["diff_vs"], []).append(entry)
+
+        # Summary from latest bench run
         latest_test = None
         latest_scores: list[dict] = []
         if commit_run_rows:
             last = commit_run_rows[-1]
             latest_test = last["test"]
-            latest_scores = store.benchmark_results_for(runs[-1]["id"])
+            if bench_runs:
+                latest_scores = store.benchmark_results_for(bench_runs[-1]["id"])
+
+        # Collect all profiles across bench + profile runs for the commit-level badge
+        latest_bench_profiles: list[dict] = []
+        if bench_runs:
+            latest_bench_profiles = [
+                {"event": p["event"], "file_path": _rebase(p["file_path"], report_dir)}
+                for p in store.profiles_for(bench_runs[-1]["id"])
+            ]
+        latest_profile_profiles: list[dict] = []
+        if profile_runs:
+            latest_profile_profiles = [
+                {"event": p["event"], "file_path": _rebase(p["file_path"], report_dir)}
+                for p in store.profiles_for(profile_runs[-1]["id"])
+            ]
 
         commit_rows.append({
             "sha": commit["sha"],
@@ -180,12 +222,15 @@ def generate(store: Store, output_path: Path, github_url: str | None = None, nex
             "author": commit["author"],
             "ts": _ts(commit["timestamp"]),
             "runs": commit_run_rows,
+            "profile_runs": profile_run_rows,
             "latest_test": latest_test,
             "latest_scores": latest_scores,
+            "latest_bench_profiles": latest_bench_profiles,
+            "latest_profile_profiles": latest_profile_profiles,
+            "diffs_by_vs": diffs_by_vs,
             "in_progress": next_sha is not None and commit["sha"] == next_sha,
         })
 
-    # Benchmark groups: ordered list of unique class names inferred from JMH benchmark names.
     seen_groups: dict[str, None] = {}
     for name in benchmark_names:
         seen_groups[_bench_group(name)] = None
@@ -204,7 +249,6 @@ def generate(store: Store, output_path: Path, github_url: str | None = None, nex
             for g in seen_groups
         ]),
         current_epoch=current_epoch,
-        # Relative paths from epoch-N/index.html to epoch-M/index.html
         epoch_links_json=json.dumps([
             {"epoch": ep, "path": f"../epoch-{ep}/"}
             for ep in all_epochs

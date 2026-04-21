@@ -5,6 +5,7 @@ import math
 import sqlite3
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -71,6 +72,19 @@ CREATE TABLE IF NOT EXISTS secondary_metrics (
     unit        TEXT NOT NULL,
     raw_data    TEXT
 );
+
+CREATE TABLE IF NOT EXISTS diffs (
+    id          INTEGER PRIMARY KEY,
+    epoch       INTEGER NOT NULL,
+    left_sha    TEXT NOT NULL,
+    right_sha   TEXT NOT NULL,
+    diff_vs     TEXT NOT NULL,
+    source_ext  TEXT NOT NULL,
+    diff_path   TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS diffs_right_sha ON diffs (epoch, right_sha);
+CREATE INDEX IF NOT EXISTS diffs_pair      ON diffs (epoch, left_sha, right_sha);
 """
 
 
@@ -124,6 +138,8 @@ class Store:
             ("commits",          "position",        "INTEGER NOT NULL DEFAULT 0"),
             ("commits",          "tree_sha",        "TEXT"),
             ("benchmark_results","raw_data",        "TEXT"),
+            # 'bench' | 'profile' — distinguishes bench_cmd runs from profile_cmd runs
+            ("runs",             "source",          "TEXT NOT NULL DEFAULT 'bench'"),
         ]
         existing = {
             (row[0], row[1])
@@ -216,17 +232,47 @@ class Store:
 
     # ── Commits ───────────────────────────────────────────────────────────────
 
-    def has_runs(self, sha: str, run_benchmarks: bool = True, run_tests: bool = True) -> bool:
+    def has_runs(
+        self,
+        sha: str,
+        run_benchmarks: bool = True,
+        run_tests: bool = True,
+        source: str | None = None,
+    ) -> bool:
+        """Check whether a commit already has runs in the current epoch.
+
+        *source* restricts the check to runs of that source ('bench' or 'profile').
+        When None, any source is considered.
+        """
         epoch = self.current_epoch()
+        source_filter = f" AND r.source='{source}'" if source else ""
         if run_benchmarks:
-            sql = ("SELECT 1 FROM benchmark_results b JOIN runs r ON b.run_id=r.id "
-                   "WHERE r.commit_sha=? AND r.epoch=? LIMIT 1")
+            sql = (
+                f"SELECT 1 FROM benchmark_results b JOIN runs r ON b.run_id=r.id "
+                f"WHERE r.commit_sha=? AND r.epoch=?{source_filter} LIMIT 1"
+            )
         elif run_tests:
-            sql = ("SELECT 1 FROM test_runs t JOIN runs r ON t.run_id=r.id "
-                   "WHERE r.commit_sha=? AND r.epoch=? LIMIT 1")
+            sql = (
+                f"SELECT 1 FROM test_runs t JOIN runs r ON t.run_id=r.id "
+                f"WHERE r.commit_sha=? AND r.epoch=?{source_filter} LIMIT 1"
+            )
         else:
-            sql = "SELECT 1 FROM runs WHERE commit_sha=? AND epoch=? LIMIT 1"
+            sql = (
+                f"SELECT 1 FROM runs WHERE commit_sha=? AND epoch=?{source_filter.replace(' AND r.', ' AND ')} LIMIT 1"
+                if source_filter
+                else "SELECT 1 FROM runs WHERE commit_sha=? AND epoch=? LIMIT 1"
+            )
         return self._conn.execute(sql, (sha, epoch)).fetchone() is not None
+
+    def has_profile_runs(self, sha: str) -> bool:
+        """Check whether a commit already has profile-source runs with artifacts."""
+        epoch = self.current_epoch()
+        row = self._conn.execute(
+            "SELECT 1 FROM profiles p JOIN runs r ON p.run_id=r.id "
+            "WHERE r.commit_sha=? AND r.epoch=? AND r.source='profile' LIMIT 1",
+            (sha, epoch),
+        ).fetchone()
+        return row is not None
 
     def retire_stale_commits(self, current_shas: set[str]) -> int:
         """Remove from the current epoch any commits whose SHA is not in current_shas.
@@ -304,13 +350,13 @@ class Store:
         """Copy a run's results to a new run row for commit_sha. Returns new run_id."""
         epoch = self.current_epoch()
         source = self._conn.execute(
-            "SELECT bench_cmd, test_cmd, bench_output, jmh_json_path, run_at FROM runs WHERE id=?",
+            "SELECT bench_cmd, test_cmd, bench_output, jmh_json_path, run_at, source FROM runs WHERE id=?",
             (source_run_id,),
         ).fetchone()
         cur = self._conn.execute(
-            "INSERT INTO runs(commit_sha, epoch, run_at, bench_cmd, test_cmd, bench_output, jmh_json_path, reused_from_sha) "
-            "VALUES(?,?,?,?,?,?,?,?)",
-            (commit_sha, epoch, source[4], source[0], source[1], source[2], source[3], reused_from_sha),
+            "INSERT INTO runs(commit_sha, epoch, run_at, bench_cmd, test_cmd, bench_output, jmh_json_path, reused_from_sha, source) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (commit_sha, epoch, source[4], source[0], source[1], source[2], source[3], reused_from_sha, source[5]),
         )
         new_run_id = cur.lastrowid
 
@@ -351,11 +397,17 @@ class Store:
 
     # ── Runs ──────────────────────────────────────────────────────────────────
 
-    def create_run(self, commit_sha: str, bench_cmd: str | None, test_cmd: str | None) -> int:
+    def create_run(
+        self,
+        commit_sha: str,
+        bench_cmd: str | None,
+        test_cmd: str | None,
+        source: str = "bench",
+    ) -> int:
         epoch = self.current_epoch()
         cur = self._conn.execute(
-            "INSERT INTO runs(commit_sha, epoch, run_at, bench_cmd, test_cmd) VALUES(?,?,?,?,?)",
-            (commit_sha, epoch, int(time.time()), bench_cmd, test_cmd),
+            "INSERT INTO runs(commit_sha, epoch, run_at, bench_cmd, test_cmd, source) VALUES(?,?,?,?,?,?)",
+            (commit_sha, epoch, int(time.time()), bench_cmd, test_cmd, source),
         )
         self._conn.commit()
         return cur.lastrowid  # type: ignore[return-value]
@@ -412,7 +464,73 @@ class Store:
         )
         self._conn.commit()
 
+    # ── Diffs ─────────────────────────────────────────────────────────────────
+
+    def save_diff(
+        self,
+        epoch: int,
+        left_sha: str,
+        right_sha: str,
+        diff_vs: str,
+        source_ext: str,
+        diff_path: str,
+    ) -> None:
+        """Store one output file produced by a diff tool invocation."""
+        now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._conn.execute(
+            "INSERT INTO diffs(epoch, left_sha, right_sha, diff_vs, source_ext, diff_path, created_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (epoch, left_sha, right_sha, diff_vs, source_ext, diff_path, now),
+        )
+        self._conn.commit()
+
+    def diffs_for_right_sha(self, right_sha: str) -> list[dict]:
+        """Return all diff records where right_sha matches, for the current epoch."""
+        epoch = self.current_epoch()
+        rows = self._conn.execute(
+            "SELECT left_sha, right_sha, diff_vs, source_ext, diff_path, created_at "
+            "FROM diffs WHERE epoch=? AND right_sha=? ORDER BY diff_vs, source_ext, diff_path",
+            (epoch, right_sha),
+        ).fetchall()
+        return [
+            dict(zip(["left_sha", "right_sha", "diff_vs", "source_ext", "diff_path", "created_at"], r))
+            for r in rows
+        ]
+
+    def diff_exists(self, epoch: int, left_sha: str, right_sha: str, diff_vs: str, source_ext: str) -> bool:
+        """Return True if at least one diff file exists for this combination."""
+        row = self._conn.execute(
+            "SELECT 1 FROM diffs WHERE epoch=? AND left_sha=? AND right_sha=? AND diff_vs=? AND source_ext=? LIMIT 1",
+            (epoch, left_sha, right_sha, diff_vs, source_ext),
+        ).fetchone()
+        return row is not None
+
+    def best_profiles_for_commit(self, commit_sha: str) -> list[dict]:
+        """Return profiles from the most recent profile run; fall back to the most recent bench run."""
+        epoch = self.current_epoch()
+        for source in ("profile", "bench"):
+            run_row = self._conn.execute(
+                "SELECT id FROM runs WHERE commit_sha=? AND epoch=? AND source=? ORDER BY run_at DESC LIMIT 1",
+                (commit_sha, epoch, source),
+            ).fetchone()
+            if run_row:
+                profiles = self.profiles_for(run_row[0])
+                if profiles:
+                    return profiles
+        return []
+
     # ── Queries ───────────────────────────────────────────────────────────────
+
+    def commit_info(self, sha: str) -> dict | None:
+        """Look up a single commit by full or prefix SHA (epoch-independent)."""
+        row = self._conn.execute(
+            "SELECT sha, short_sha, message, author, timestamp, branch "
+            "FROM commits WHERE sha=? OR sha LIKE ? LIMIT 1",
+            (sha, sha + "%"),
+        ).fetchone()
+        if row is None:
+            return None
+        return dict(zip(["sha", "short_sha", "message", "author", "timestamp", "branch"], row))
 
     def all_commits(self) -> list[dict]:
         epoch = self.current_epoch()
@@ -425,11 +543,11 @@ class Store:
     def runs_for_commit(self, commit_sha: str) -> list[dict]:
         epoch = self.current_epoch()
         rows = self._conn.execute(
-            "SELECT id, run_at, bench_cmd, test_cmd, bench_output, jmh_json_path, reused_from_sha FROM runs "
+            "SELECT id, run_at, bench_cmd, test_cmd, bench_output, jmh_json_path, reused_from_sha, source FROM runs "
             "WHERE commit_sha=? AND epoch=? ORDER BY run_at ASC",
             (commit_sha, epoch),
         ).fetchall()
-        return [dict(zip(["id", "run_at", "bench_cmd", "test_cmd", "bench_output", "jmh_json_path", "reused_from_sha"], r)) for r in rows]
+        return [dict(zip(["id", "run_at", "bench_cmd", "test_cmd", "bench_output", "jmh_json_path", "reused_from_sha", "source"], r)) for r in rows]
 
     def test_run_for(self, run_id: int) -> dict | None:
         row = self._conn.execute(
@@ -468,16 +586,16 @@ class Store:
         return [{"id": r[0], "event": r[1], "file_path": r[2]} for r in rows]
 
     def run_number_for_id(self, run_id: int) -> int:
-        """Return the 1-based position of run_id among all runs for its commit in its epoch."""
+        """Return the 1-based position of run_id among all same-source runs for its commit."""
         row = self._conn.execute(
-            "SELECT commit_sha, epoch FROM runs WHERE id=?", (run_id,)
+            "SELECT commit_sha, epoch, source FROM runs WHERE id=?", (run_id,)
         ).fetchone()
         if not row:
             return 1
-        commit_sha, epoch = row
+        commit_sha, epoch, source = row
         siblings = self._conn.execute(
-            "SELECT id FROM runs WHERE commit_sha=? AND epoch=? ORDER BY run_at ASC",
-            (commit_sha, epoch),
+            "SELECT id FROM runs WHERE commit_sha=? AND epoch=? AND source=? ORDER BY run_at ASC",
+            (commit_sha, epoch, source),
         ).fetchall()
         for i, (rid,) in enumerate(siblings):
             if rid == run_id:
@@ -487,12 +605,12 @@ class Store:
     def all_runs_with_metadata(self) -> list[dict]:
         """Return every run (all epochs) with commit info — used by migrate command."""
         rows = self._conn.execute(
-            "SELECT r.id, r.epoch, r.commit_sha, r.jmh_json_path, c.short_sha, c.message "
+            "SELECT r.id, r.epoch, r.commit_sha, r.jmh_json_path, c.short_sha, c.message, r.source "
             "FROM runs r JOIN commits c ON r.commit_sha = c.sha "
             "ORDER BY r.epoch, r.commit_sha, r.run_at ASC"
         ).fetchall()
         return [
-            dict(zip(["id", "epoch", "commit_sha", "jmh_json_path", "short_sha", "message"], r))
+            dict(zip(["id", "epoch", "commit_sha", "jmh_json_path", "short_sha", "message", "source"], r))
             for r in rows
         ]
 

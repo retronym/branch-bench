@@ -7,7 +7,7 @@ from pathlib import Path
 import click
 
 from .config import load_config, commit_slug, TEMPLATE
-from .runner import run_branch
+from .runner import run_branch, profile_branch, diff_range
 from .report import generate, generate_index
 from .storage import Store
 from . import git
@@ -89,6 +89,7 @@ def init() -> None:
 )
 @click.option("--no-test", is_flag=True, help="Skip correctness tests")
 @click.option("--no-bench", is_flag=True, help="Skip benchmarks")
+@click.option("--no-profile", is_flag=True, help="Skip profile_cmd even if configured")
 @click.option("--all/--skip-existing", "run_all", default=False, help="Re-run already-processed commits")
 @click.option("--no-live-report", is_flag=True, default=False, help="Disable per-commit report updates")
 @click.option("--report", "auto_report", is_flag=True, default=False, help="Generate report after run (always on with live report)")
@@ -102,6 +103,24 @@ def init() -> None:
         "-vv also streams the test command."
     ),
 )
+@click.option(
+    "--diff", "run_diff", is_flag=True, default=False,
+    help="Run configured diff tools after each commit (requires --strategy linear and [diff] config).",
+)
+@click.option(
+    "--diff-vs",
+    "diff_vs",
+    multiple=True,
+    type=str,
+    default=("previous",),
+    show_default=True,
+    help=(
+        "What to diff each commit against. Repeatable. "
+        "'previous' = the preceding commit in the linear walk; "
+        "any git ref (SHA, tag, branch) = diff vs that fixed commit. "
+        "Example: --diff-vs previous --diff-vs abc1234"
+    ),
+)
 def run(
     config: str,
     commits: int | None,
@@ -111,12 +130,15 @@ def run(
     strategy: str,
     no_test: bool,
     no_bench: bool,
+    no_profile: bool,
     run_all: bool,
     no_live_report: bool,
     auto_report: bool,
     open_browser: bool,
     epoch_override: int | None,
     verbose: int,
+    run_diff: bool,
+    diff_vs: tuple[str, ...],
 ) -> None:
     """Walk commits on a branch, run tests and benchmarks, store results."""
     config_path = Path(config)
@@ -125,6 +147,10 @@ def run(
         raise SystemExit(1)
     cfg = load_config(config_path)
     store = Store(cfg.db_path(), epoch_override=epoch_override)
+
+    if run_diff and strategy != "linear":
+        click.echo("Note: --diff is only effective with --strategy linear; ignoring.")
+        run_diff = False
 
     try:
         run_branch(
@@ -137,6 +163,9 @@ def run(
             strategy=strategy,
             run_tests=not no_test,
             run_benchmarks=not no_bench,
+            run_profile_cmd=not no_profile,
+            run_diff=run_diff,
+            diff_vs=diff_vs,
             skip_existing=not run_all,
             live_report=not no_live_report,
             verbose=verbose,
@@ -147,6 +176,193 @@ def run(
 
     if auto_report or open_browser:
         _do_report(cfg, epoch_override, open_browser=open_browser)
+
+
+@main.command(name="profile")
+@click.option("--config", default=CONFIG_FILE, help="Path to bench.toml")
+@click.option("--commits", "-n", type=int, default=None, help="Max commits to process")
+@click.option("--from", "--from-sha", "from_ref", default=None, metavar="REF")
+@click.option("--to", "--to-sha", "to_ref", default=None, metavar="REF")
+@click.option("--sha", "target_refs", multiple=True, metavar="REF|RANGE")
+@click.option("--all/--skip-existing", "run_all", default=False, help="Re-profile even if already done")
+@click.option("--no-live-report", is_flag=True, default=False)
+@click.option("--epoch", "epoch_override", type=int, default=None)
+@click.option("-v", "--verbose", count=True)
+@click.option(
+    "--diff", "run_diff", is_flag=True, default=False,
+    help="Run diff tools after each commit (requires [diff] config).",
+)
+@click.option(
+    "--diff-vs",
+    "diff_vs",
+    multiple=True,
+    type=str,
+    default=("previous",),
+    show_default=True,
+    help="What to diff against: 'previous' or a git ref. Repeatable.",
+)
+def profile_cmd(
+    config: str,
+    commits: int | None,
+    from_ref: str | None,
+    to_ref: str | None,
+    target_refs: tuple[str, ...],
+    run_all: bool,
+    no_live_report: bool,
+    epoch_override: int | None,
+    verbose: int,
+    run_diff: bool,
+    diff_vs: tuple[str, ...],
+) -> None:
+    """Run profile_cmd for each commit — fixed-workload profiling for meaningful diffs.
+
+    Unlike bench, this command only runs profile_cmd and collects flamegraphs /
+    JFR files.  No primary or secondary metrics are stored.  Use a fixed iteration
+    count (-bm ss -i N) in profile_cmd so both sides of a diff do identical work.
+    """
+    cfg = load_config(Path(config))
+    if not cfg.commands.profile_cmd:
+        raise click.ClickException("profile_cmd is not set in [commands].")
+    store = Store(cfg.db_path(), epoch_override=epoch_override)
+    try:
+        profile_branch(
+            cfg=cfg,
+            store=store,
+            max_commits=commits,
+            from_ref=from_ref,
+            to_ref=to_ref,
+            target_refs=target_refs,
+            run_diff=run_diff,
+            diff_vs=diff_vs,
+            skip_existing=not run_all,
+            live_report=not no_live_report,
+            verbose=verbose,
+            log=lambda s: click.echo(s),
+        )
+    finally:
+        store.close()
+
+
+@main.command(name="diff")
+@click.argument("refs", nargs=-1, required=True)
+@click.option("--config", default=CONFIG_FILE, help="Path to bench.toml")
+@click.option(
+    "--diff-vs",
+    "diff_vs",
+    multiple=True,
+    type=str,
+    default=("previous",),
+    show_default=True,
+    help=(
+        "What to diff against. Repeatable. 'previous' = adjacent pairs; "
+        "any git ref = each commit vs that fixed ref. Ignored for two-SHA form."
+    ),
+)
+@click.option("--epoch", "epoch_override", type=int, default=None)
+def diff_cmd(
+    refs: tuple[str, ...],
+    config: str,
+    diff_vs: tuple[str, ...],
+    epoch_override: int | None,
+) -> None:
+    """Run configured diff tools between commits.
+
+    Two-SHA form — diff exactly this pair:
+
+      branch-bench diff SHA1 SHA2
+
+    Range form — diff adjacent pairs and/or vs branch-base:
+
+      branch-bench diff SHA1..SHA2 [--diff-vs previous|branch-base|both]
+
+    Artifacts are written to the epoch assets directory and recorded in the DB
+    so they appear in the static report and are served by `branch-bench serve`.
+    """
+    cfg = load_config(Path(config))
+    if not cfg.diff.commands:
+        raise click.ClickException("No [diff] commands configured in bench.toml.")
+
+    repo_path = Path(cfg.repo.path).resolve()
+    store = Store(cfg.db_path(), epoch_override=epoch_override)
+    log = click.echo
+
+    try:
+        epoch = store.current_epoch()
+        merge_base = git.find_merge_base(repo_path, cfg.repo.branch)
+        all_commits = git.list_commits(repo_path, cfg.repo.branch, exclude_before=merge_base)
+
+        def _find_commit(sha_prefix: str) -> "git.Commit | None":
+            for c in all_commits:
+                if c.sha == sha_prefix or c.sha.startswith(sha_prefix) or c.short_sha.startswith(sha_prefix):
+                    return c
+            # Also try rev_parse for refs not on branch (e.g. the merge-base itself)
+            full = git.rev_parse(repo_path, sha_prefix)
+            if full:
+                for c in all_commits:
+                    if c.sha == full:
+                        return c
+            return None
+
+        # ── Two-SHA form ─────────────────────────────────────────────────────
+        if len(refs) == 2:
+            left_ref, right_ref = refs
+            left_commit = _find_commit(left_ref)
+            right_commit = _find_commit(right_ref)
+            if not left_commit:
+                raise click.ClickException(f"Commit not found on branch: {left_ref!r}")
+            if not right_commit:
+                raise click.ClickException(f"Commit not found on branch: {right_ref!r}")
+            log(f"Diffing {left_commit.short_sha}…{right_commit.short_sha}")
+            from .runner import diff_pair as _diff_pair
+            _diff_pair(
+                left_sha=left_commit.sha,
+                left_short_sha=left_commit.short_sha,
+                left_message=left_commit.message,
+                right_commit=right_commit,
+                diff_vs="on-demand",
+                cfg=cfg,
+                store=store,
+                repo_path=repo_path,
+                epoch=epoch,
+                branch=cfg.repo.branch,
+                log=log,
+            )
+            return
+
+        # ── Range / single-ref form ───────────────────────────────────────────
+        if len(refs) == 1:
+            ref = refs[0]
+            if ".." in ref:
+                shas = git.expand_range(repo_path, ref)
+                if not shas:
+                    raise click.ClickException(f"Range {ref!r} yielded no commits.")
+                # expand_range returns newest-first; reverse for chronological
+                shas = list(reversed(shas))
+                range_commits = [c for sha in shas for c in [_find_commit(sha)] if c]
+                if not range_commits:
+                    raise click.ClickException("None of the range commits found on branch.")
+            else:
+                # Single SHA: diff against previous and/or branch-base
+                c = _find_commit(ref)
+                if not c:
+                    raise click.ClickException(f"Commit not found on branch: {ref!r}")
+                range_commits = [c]
+        else:
+            raise click.ClickException(
+                "Provide either two SHAs (SHA1 SHA2) or a range (SHA1..SHA2)."
+            )
+
+        diff_range(
+            cfg=cfg,
+            store=store,
+            commits=range_commits,
+            diff_vs=diff_vs,
+            repo_path=repo_path,
+            epoch=epoch,
+            log=log,
+        )
+    finally:
+        store.close()
 
 
 @main.command()
@@ -238,7 +454,7 @@ def status(config: str) -> None:
 @click.option("--config", default=CONFIG_FILE, help="Path to bench.toml")
 @click.option("--from-db", "from_db", default=None, help="Old database file to migrate from (copied to new location)")
 def migrate(config: str, from_db: str | None) -> None:
-    """Migrate profiles and JMH JSONs to the new epoch/slug/run layout.
+    """Migrate profiles and JMH JSONs to the new epoch/slug/source/run layout.
 
     Files are COPIED to their new locations; originals are left in place.
     After migration, reports are regenerated for all epochs.
@@ -269,22 +485,21 @@ def migrate(config: str, from_db: str | None) -> None:
             click.echo("No runs found in database.")
             return
 
-        # Group by (epoch, commit_sha) to compute per-commit run numbers
-        # all_runs_with_metadata is ordered by epoch, commit_sha, run_at ASC
-        run_number: dict[tuple[int, str], int] = {}
+        run_number: dict[tuple[int, str, str], int] = {}  # (epoch, commit_sha, source) → count
         copied = skipped = 0
 
         for run in runs:
-            key = (run["epoch"], run["commit_sha"])
+            source = run.get("source") or "bench"
+            key = (run["epoch"], run["commit_sha"], source)
             run_number[key] = run_number.get(key, 0) + 1
             rnum = run_number[key]
 
             run_dir = cfg.run_assets_dir(
-                run["epoch"], run["short_sha"], run["message"], rnum
+                run["epoch"], run["short_sha"], run["message"], rnum, source
             )
             run_dir.mkdir(parents=True, exist_ok=True)
 
-            # Migrate JMH JSON
+            # Migrate JMH JSON (bench runs only)
             old_jmh = run["jmh_json_path"]
             if old_jmh:
                 src = Path(old_jmh)
@@ -299,10 +514,10 @@ def migrate(config: str, from_db: str | None) -> None:
 
             # Migrate profiles
             for prof in store.profiles_for_migration(run["id"]):
-                src = Path(prof["file_path"])
-                dest = run_dir / src.name
-                if src.exists() and not dest.exists():
-                    shutil.copy2(src, dest)
+                src_path = Path(prof["file_path"])
+                dest = run_dir / src_path.name
+                if src_path.exists() and not dest.exists():
+                    shutil.copy2(src_path, dest)
                     rel = dest.relative_to(Path.cwd()) if dest.is_absolute() else dest
                     store.update_profile_path(prof["id"], str(rel))
                     copied += 1
@@ -326,3 +541,153 @@ def migrate(config: str, from_db: str | None) -> None:
         click.echo("Migration complete. Original files have not been deleted.")
     finally:
         store.close()
+
+
+@main.command()
+@click.option("--config", default=CONFIG_FILE, help="Path to bench.toml")
+@click.option("--port", default=7823, show_default=True, help="Port to listen on")
+@click.option("--epoch", "epoch_override", type=int, default=None, help="Serve a specific epoch")
+def serve(config: str, port: int, epoch_override: int | None) -> None:
+    """Serve the report with an HTTP API for on-demand flamegraph diffing.
+
+    Unlike the static report, the server can run diff tools on request when
+    you select two commits in the UI.  Pre-computed AOT diffs (from
+    `branch-bench diff` or `--diff`) are always available statically.
+    """
+    cfg = load_config(Path(config))
+    store = Store(cfg.db_path(), epoch_override=epoch_override)
+    try:
+        epoch = store.current_epoch()
+    finally:
+        store.close()
+
+    epoch_dir = cfg.epoch_dir(epoch)
+    report_html = cfg.report_path(epoch)
+
+    if not report_html.exists():
+        raise click.ClickException(
+            f"{report_html} not found. Run `branch-bench report` first."
+        )
+
+    _run_server(cfg, epoch, epoch_dir, report_html, port)
+
+
+def _run_server(cfg, epoch: int, epoch_dir: Path, report_html: Path, port: int) -> None:
+    """Start a stdlib-based HTTP server with diff API."""
+    import http.server
+    import json
+    import mimetypes
+    import urllib.parse
+
+    from .runner import diff_pair as _diff_pair
+    from .storage import Store as _Store
+
+    # Inject server-mode flag into the report HTML at serve time
+    _report_source = report_html.read_text(encoding="utf-8")
+    _report_injected = _report_source.replace(
+        "window.__runLog=[];",
+        f"window.__runLog=[];\nwindow.__serverMode=true;\nwindow.__serverEpoch={epoch};",
+        1,
+    )
+
+    repo_path = Path(cfg.repo.path).resolve()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):
+            pass  # silence default access log
+
+        def _send(self, code: int, content_type: str, body: bytes) -> None:
+            self.send_response(code)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            path = parsed.path.lstrip("/")
+
+            if path in ("", "index.html"):
+                self._send(200, "text/html; charset=utf-8", _report_injected.encode())
+                return
+
+            # Static assets relative to epoch_dir
+            candidate = (epoch_dir / path).resolve()
+            try:
+                candidate.relative_to(epoch_dir.resolve())
+            except ValueError:
+                self._send(403, "text/plain", b"Forbidden")
+                return
+
+            if candidate.is_file():
+                mime, _ = mimetypes.guess_type(str(candidate))
+                self._send(200, mime or "application/octet-stream", candidate.read_bytes())
+            else:
+                self._send(404, "text/plain", b"Not found")
+
+        def do_POST(self):
+            if self.path != "/api/diff":
+                self._send(404, "text/plain", b"Not found")
+                return
+
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length) or b"{}")
+            left_sha = body.get("left_sha", "")
+            right_sha = body.get("right_sha", "")
+
+            if not left_sha or not right_sha:
+                self._send(400, "application/json", json.dumps({"error": "left_sha and right_sha required"}).encode())
+                return
+
+            store = _Store(cfg.db_path(), epoch_override=epoch)
+            try:
+                # Find commits
+                all_commits = git.list_commits(
+                    repo_path, cfg.repo.branch,
+                    exclude_before=git.find_merge_base(repo_path, cfg.repo.branch),
+                )
+                left_commit = next((c for c in all_commits if c.sha == left_sha or c.sha.startswith(left_sha)), None)
+                right_commit = next((c for c in all_commits if c.sha == right_sha or c.sha.startswith(right_sha)), None)
+
+                if not left_commit or not right_commit:
+                    self._send(404, "application/json", json.dumps({"error": "commit not found"}).encode())
+                    return
+
+                messages: list[str] = []
+                _diff_pair(
+                    left_sha=left_commit.sha,
+                    left_short_sha=left_commit.short_sha,
+                    left_message=left_commit.message,
+                    right_commit=right_commit,
+                    diff_vs="on-demand",
+                    cfg=cfg,
+                    store=store,
+                    repo_path=repo_path,
+                    epoch=epoch,
+                    branch=cfg.repo.branch,
+                    log=messages.append,
+                )
+
+                raw_diffs = store.diffs_for_right_sha(right_sha)
+                # Rebase diff_path to be epoch-dir-relative so the browser
+                # can request them from this server (which serves under epoch_dir).
+                epoch_dir_resolved = epoch_dir.resolve()
+                rebased = []
+                for d in raw_diffs:
+                    try:
+                        rel = Path(d["diff_path"]).resolve().relative_to(epoch_dir_resolved)
+                        rebased.append({**d, "diff_path": str(rel)})
+                    except ValueError:
+                        rebased.append(d)
+                resp = json.dumps({"diffs": rebased, "log": messages}).encode()
+                self._send(200, "application/json", resp)
+            finally:
+                store.close()
+
+    server = http.server.HTTPServer(("", port), Handler)
+    click.echo(f"Serving epoch {epoch} at http://localhost:{port}/")
+    click.echo("Press Ctrl-C to stop.")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass

@@ -67,12 +67,72 @@
   .ab-lock  { color: #ff7b72; background: #3d1210; border-color: #f8514955; }
   .ab-jfr   { color: #d2a8ff; background: #251e3a; border-color: #bc8cff55; }
   .ab-data  { color: #8b949e; background: #21262d; border-color: #30363d; }
+  .ab-diff  { color: #f0883e; background: #2a1500; border-color: #f0883e55; }
   .ab-cpu:hover   { border-color: #388bfd; }
   .ab-alloc:hover { border-color: #3fb950; }
   .ab-wall:hover  { border-color: #d29922; }
   .ab-lock:hover  { border-color: #f85149; }
   .ab-jfr:hover   { border-color: #bc8cff; }
   .ab-data:hover  { border-color: #8b949e; }
+  .ab-diff:hover  { border-color: #f0883e; }
+  /* ── Artifact section labels ── */
+  .artifact-section { margin-top: 0.35rem; }
+  .artifact-label {
+    font-size: 0.62rem; color: #484f58; text-transform: uppercase;
+    letter-spacing: 0.06em; margin-bottom: 0.2rem;
+  }
+  /* ── Diff panel (server mode) ── */
+  #diff-panel {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    background: #161b22; border-top: 1px solid #30363d;
+    display: none; z-index: 50; height: 55vh;
+    flex-direction: column;
+  }
+  #diff-panel.visible { display: flex; }
+  #diff-panel-resize {
+    height: 6px; flex-shrink: 0; cursor: ns-resize;
+    background: transparent; border-top: 2px solid #30363d;
+  }
+  #diff-panel-resize:hover, #diff-panel-resize.dragging { border-top-color: #388bfd; }
+  #diff-panel-hdr {
+    display: flex; align-items: center; gap: 0.75rem;
+    padding: 0.4rem 1rem; background: #0d1117; border-bottom: 1px solid #21262d;
+    font-size: 0.78rem; flex-shrink: 0;
+  }
+  #diff-panel-title { font-weight: 600; font-family: monospace; flex: 1; }
+  #diff-panel-close {
+    background: none; border: none; cursor: pointer;
+    color: #8b949e; font-size: 1rem; line-height: 1; padding: 0.1rem 0.3rem;
+  }
+  #diff-panel-close:hover { color: #e6edf3; }
+  #diff-panel-body {
+    overflow-y: auto; padding: 0.75rem 1rem;
+    display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: flex-start;
+  }
+  .diff-frame-wrap {
+    display: flex; flex-direction: column; flex: 1 1 560px; min-width: 280px;
+    gap: 0.3rem; min-height: 0;
+  }
+  .diff-frame-wrap iframe {
+    flex: 1 1 auto; min-height: 200px; border: 1px solid #30363d;
+    border-radius: 4px; background: #fff;
+  }
+  /* ── Compare button (server mode) ── */
+  #compare-bar {
+    position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%);
+    background: #161b22; border: 1px solid #388bfd; border-radius: 6px;
+    padding: 0.5rem 1rem; display: none; align-items: center; gap: 0.75rem;
+    z-index: 40; font-size: 0.82rem; box-shadow: 0 4px 16px rgba(0,0,0,.4);
+  }
+  #compare-bar.visible { display: flex; }
+  #compare-btn {
+    background: #388bfd; border: none; color: #fff; border-radius: 4px;
+    padding: 0.3rem 0.8rem; font-size: 0.78rem; cursor: pointer; font-weight: 600;
+  }
+  #compare-btn:hover { background: #58a6ff; }
+  #compare-clear { color: #8b949e; cursor: pointer; font-size: 0.75rem; }
+  #compare-clear:hover { color: #e6edf3; }
+  .compare-cb { accent-color: #388bfd; cursor: pointer; }
   details { margin-top: 0.4rem; }
   summary {
     cursor: pointer; font-size: 0.72rem; color: #8b949e;
@@ -194,6 +254,24 @@
 </head>
 <body>
 <div id="toast"></div>
+
+<!-- Compare bar (server mode only) -->
+<div id="compare-bar">
+  <span id="compare-label">Select 2 commits to compare</span>
+  <button id="compare-btn" onclick="runCompare()" disabled>Compare</button>
+  <span id="compare-clear" onclick="clearCompare()">✕ clear</span>
+</div>
+
+<!-- Diff result panel (server mode only) -->
+<div id="diff-panel">
+  <div id="diff-panel-resize"></div>
+  <div id="diff-panel-hdr">
+    <span id="diff-panel-title">Diff results</span>
+    <button id="diff-panel-close" onclick="closeDiffPanel()">✕</button>
+  </div>
+  <div id="diff-panel-body"></div>
+</div>
+
 <nav class="topnav">
   <div class="nav-left">
     <span class="nav-brand">branch-bench</span>
@@ -281,9 +359,10 @@ const currentEpoch         = {{ current_epoch }};
 const epochLinks           = {{ epoch_links_json | safe }};
 
 {% raw %}
+// Server-mode flag — overridden by `branch-bench serve` at runtime
+const serverMode = typeof window.__serverMode !== 'undefined' ? window.__serverMode : false;
+
 // ── URL state ─────────────────────────────────────────────────────────────────
-// State is persisted to query params (?mode=&runs=&sec=&bm=) + hash (#sha,sha).
-// All readers tolerate missing/invalid values by falling back to defaults.
 const _VALID_CHART_MODES = new Set(['mean','min','max','median','raw']);
 const _VALID_RUNS_MODES  = new Set(['latest','all','aggregate']);
 
@@ -312,9 +391,8 @@ const { mode: _initMode, runs: _initRuns, sec: _initSec, bms: _initBms } = _pars
     opt.value = name; opt.textContent = name;
     sel.appendChild(opt);
   }
-  sel.value = _initSec; // restore from URL (no-op if not found)
+  sel.value = _initSec;
   if (secondaryMetricNames.length === 0) {
-    // Hide: preceding sep, preceding label, the select itself, and the following sep
     const nodes = [];
     let el = sel.previousElementSibling;
     if (el && el.classList.contains('mode-sep')) { nodes.push(el); el = el.previousElementSibling; }
@@ -326,8 +404,7 @@ const { mode: _initMode, runs: _initRuns, sec: _initSec, bms: _initBms } = _pars
   }
 })();
 
-// ── Benchmark group picker (multi-select) ─────────────────────────────────────
-// Empty set = no filter = all groups visible.
+// ── Benchmark group picker ────────────────────────────────────────────────────
 const selectedBenchmarks = new Set(_initBms);
 
 (function() {
@@ -341,11 +418,10 @@ const selectedBenchmarks = new Set(_initBms);
     const btn = document.createElement('button');
     btn.className = 'bench-btn';
     btn.dataset.group = bg.group;
-    btn.title = bg.group; // full class name on hover
+    btn.title = bg.group;
     btn.textContent = bg.display;
     btn.onclick = () => toggleBenchmark(bg.group);
     picker.appendChild(btn);
-    // Highlight based on URL state (empty selection = show all = all highlighted).
     btn.classList.toggle('active', selectedBenchmarks.size === 0 || selectedBenchmarks.has(bg.group));
   }
 })();
@@ -361,17 +437,14 @@ function toggleBenchmark(group) {
 }
 
 function _applyBenchmarkFilter() {
-  const none = selectedBenchmarks.size === 0; // empty = show all
-  // Button highlight: active when selected (or when nothing selected, show all as active)
+  const none = selectedBenchmarks.size === 0;
   document.querySelectorAll('.bench-btn').forEach(b => {
     b.classList.toggle('active', none || selectedBenchmarks.has(b.dataset.group));
   });
-  // Chart cards
   document.querySelectorAll('.chart-card').forEach(card => {
     const show = none || selectedBenchmarks.has(card.dataset.benchGroup);
     card.style.display = show ? '' : 'none';
   });
-  // Table score cells
   scoreUpdaters.forEach(fn => fn());
 }
 
@@ -384,7 +457,6 @@ function _applyBenchmarkFilter() {
     li.innerHTML = `<a href="${esc(e.path)}">Epoch ${e.epoch}${e.epoch === currentEpoch ? ' ✓' : ''}</a>`;
     list.appendChild(li);
   }
-  // Hide the button entirely when there is only one epoch
   if (epochLinks.length <= 1) {
     document.getElementById('epochPicker').style.display = 'none';
   }
@@ -424,7 +496,7 @@ function showToast(msg) {
   _toastTimer = setTimeout(() => t.classList.remove('show'), 2000);
 }
 
-// ── t-distribution 99% CI (two-tailed α=0.01) critical values ─────────────────
+// ── t-distribution 99% CI ─────────────────────────────────────────────────────
 function tValue99(df) {
   if (df <= 0) return 63.657;
   const tbl = [
@@ -450,17 +522,16 @@ function pooledStats(rawArrays) {
 }
 
 // ── Charts ────────────────────────────────────────────────────────────────────
-let chartMode       = _initMode; // 'mean' | 'min' | 'max' | 'raw'
-let runsMode        = _initRuns; // 'latest' | 'all' | 'aggregate' | 'run_N'
-let secondaryMetric = _initSec;  // '' | metric name
-const chartRenderers = []; // functions(errMode, runsMode, secMetric)
+let chartMode       = _initMode;
+let runsMode        = _initRuns;
+let secondaryMetric = _initSec;
+const chartRenderers = [];
 
-// Sync mode buttons to URL state (HTML defaults to 'mean' active)
 document.querySelectorAll('.mode-btn').forEach(b =>
   b.classList.toggle('active', b.dataset.mode === chartMode));
 
 const palette = ['#388bfd','#3fb950','#d29922','#f85149','#bc8cff','#39d353'];
-const secColor = '#f0883e'; // distinct warm colour for secondary axis
+const secColor = '#f0883e';
 const categoryArray = commits.map(c => c.message.substring(0, 40));
 const layout = (unit, mode_label, secUnit) => {
   const hasSecondary = !!secUnit;
@@ -490,7 +561,6 @@ function byCommitOrder(pts) {
 }
 
 function resolveRunGroups(bd, rMode) {
-  // Returns { label: string, pts: point[] }[]
   if (rMode === 'all') {
     const byIdx = {};
     for (const pt of bd.points) {
@@ -520,7 +590,6 @@ function resolveRunGroups(bd, rMode) {
     const aggPts = Object.values(bySha).map(pts => {
       const stats = pooledStats(pts.map(p => p.raw || []));
       const ref = pts[pts.length - 1];
-      // aggregate secondary metrics per metric name
       const secAgg = {};
       const secKeys = new Set(pts.flatMap(p => Object.keys(p.sec || {})));
       for (const k of secKeys) {
@@ -603,7 +672,6 @@ function buildTraces(bd, errMode, rMode, secMetric) {
       hovertemplate: hoverTmpl,
     });
 
-    // Secondary metric overlay (only on first group to avoid duplication in 'all' mode)
     if (gi === 0 && secMetric) {
       const secPts = pts.filter(p => p.sec?.[secMetric] != null);
       if (secPts.length) {
@@ -629,7 +697,6 @@ const chartsDiv = document.getElementById('charts');
 for (const [name, bd] of Object.entries(benchData)) {
   const card = document.createElement('div');
   card.className = 'chart-card';
-  // Tag the card with its benchmark group so the picker can show/hide it.
   card.dataset.benchGroup = name.substring(0, name.lastIndexOf('.')) || name;
   const title = document.createElement('p');
   title.className = 'chart-title';
@@ -642,7 +709,6 @@ for (const [name, bd] of Object.entries(benchData)) {
   const render = (eMode, rMode, secM) => {
     const secUnit = secM ? (bd.secUnits?.[secM] || secM) : null;
     const layoutObj = layout(bd.unit, bd.mode, secUnit);
-    // Preserve user zoom state across re-renders
     const fl = plotDiv._fullLayout;
     if (fl) {
       if (fl.xaxis && !fl.xaxis.autorange) layoutObj.xaxis.range = fl.xaxis.range.slice();
@@ -661,7 +727,6 @@ for (const [name, bd] of Object.entries(benchData)) {
   render(chartMode, runsMode, secondaryMetric);
 }
 
-// Populate "Run N" options in the dropdown
 (function() {
   const maxIdx = Math.max(-1, ...Object.values(benchData).flatMap(bd => bd.points.map(p => p.run_index)));
   const sel = document.getElementById('runs-mode');
@@ -671,8 +736,8 @@ for (const [name, bd] of Object.entries(benchData)) {
     opt.textContent = 'Run ' + (i + 1);
     sel.appendChild(opt);
   }
-  sel.value = runsMode; // restore from URL (run_N options now available)
-  if (sel.value !== runsMode) runsMode = 'latest'; // run index doesn't exist, fall back
+  sel.value = runsMode;
+  if (sel.value !== runsMode) runsMode = 'latest';
 })();
 
 function pushUrlState(shas) {
@@ -708,7 +773,7 @@ function setSecondaryMetric(val) {
   pushUrlState();
 }
 
-// ── Score cell rendering (runs-mode aware) ────────────────────────────────────
+// ── Score cell rendering ──────────────────────────────────────────────────────
 const scoreUpdaters = [];
 
 function benchGroupOf(name) {
@@ -740,7 +805,6 @@ function renderScoreCell(td, c) {
     scores = [];
   }
 
-  // Filter to the selected benchmark group(s).
   if (selectedBenchmarks.size > 0 && scores) {
     scores = scores.filter(s => selectedBenchmarks.has(benchGroupOf(s.benchmark)));
   }
@@ -749,8 +813,6 @@ function renderScoreCell(td, c) {
     td.innerHTML = '<span class="na">—</span>';
     return;
   }
-  // Show a method-name label when more than one benchmark is visible, so it's
-  // clear which score belongs to which class.
   const multiGroup = benchGroups.length > 1 && selectedBenchmarks.size !== 1;
   td.innerHTML = scores.map(s => {
     const scoreStr = s.score.toPrecision(6);
@@ -765,35 +827,34 @@ function renderScoreCell(td, c) {
   }).join('');
 }
 
-// ── Commit table ──────────────────────────────────────────────────────────────
+// ── Artifact badge helpers ────────────────────────────────────────────────────
 
-// Inline SVG icons for artifact badges
 const _IC = {
   flame:  `<svg width="9" height="10" viewBox="0 0 9 11" fill="currentColor" aria-hidden="true"><path d="M4.5 0C4.5 0 1.5 3.8 1.5 7a3 3 0 006 0c0-1-.6-.5-1-.9.5-1.5 1.6-3.2-2-6.1z"/></svg>`,
   stacks: `<svg width="10" height="9" viewBox="0 0 10 9" fill="currentColor" aria-hidden="true"><rect y="0" width="10" height="2" rx="1"/><rect y="3.5" width="7" height="2" rx="1"/><rect y="7" width="4.5" height="2" rx="1"/></svg>`,
   record: `<svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" aria-hidden="true"><circle cx="5" cy="5" r="4" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="5" cy="5" r="1.8"/></svg>`,
   data:   `<svg width="10" height="9" viewBox="0 0 10 9" fill="currentColor" aria-hidden="true"><rect x="0" y="0" width="10" height="2" rx=".8"/><rect x="0" y="3.5" width="10" height="2" rx=".8"/><rect x="0" y="7" width="10" height="2" rx=".8"/></svg>`,
+  diff:   `<svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" aria-hidden="true"><circle cx="5" cy="5" r="4" fill="none" stroke="currentColor" stroke-width="1.5"/><text x="5" y="8.5" text-anchor="middle" font-size="7" font-weight="bold">⊕</text></svg>`,
 };
 
-// cls: CSS class for colour; icon: key into _IC; dir: directional qualifier shown in badge
 const PROFILE_META = {
-  'cpu-forward':     { label: 'CPU',   dir: '↓', cls: 'ab-cpu',   icon: 'flame',  tip: 'CPU flamegraph (forward): roots at bottom, hot leaves at top — shows what your code calls.' },
-  'cpu-reverse':     { label: 'CPU',   dir: '↑', cls: 'ab-cpu',   icon: 'flame',  tip: 'CPU icicle (reverse): roots at top — great for finding unexpected callers of hot code.' },
-  'alloc-forward':   { label: 'Alloc', dir: '↓', cls: 'ab-alloc', icon: 'flame',  tip: 'Allocation flamegraph (forward): call stacks responsible for heap allocations.' },
-  'alloc-reverse':   { label: 'Alloc', dir: '↑', cls: 'ab-alloc', icon: 'flame',  tip: 'Allocation icicle (reverse): shows callers of allocating methods.' },
-  'wall-forward':    { label: 'Wall',  dir: '↓', cls: 'ab-wall',  icon: 'flame',  tip: 'Wall-clock flamegraph (forward): includes blocked/waiting time, not just on-CPU time.' },
+  'cpu-forward':     { label: 'CPU',   dir: '↓', cls: 'ab-cpu',   icon: 'flame',  tip: 'CPU flamegraph (forward): roots at bottom, hot leaves at top.' },
+  'cpu-reverse':     { label: 'CPU',   dir: '↑', cls: 'ab-cpu',   icon: 'flame',  tip: 'CPU icicle (reverse): roots at top — great for finding unexpected callers.' },
+  'alloc-forward':   { label: 'Alloc', dir: '↓', cls: 'ab-alloc', icon: 'flame',  tip: 'Allocation flamegraph (forward).' },
+  'alloc-reverse':   { label: 'Alloc', dir: '↑', cls: 'ab-alloc', icon: 'flame',  tip: 'Allocation icicle (reverse).' },
+  'wall-forward':    { label: 'Wall',  dir: '↓', cls: 'ab-wall',  icon: 'flame',  tip: 'Wall-clock flamegraph (forward): includes blocked/waiting time.' },
   'wall-reverse':    { label: 'Wall',  dir: '↑', cls: 'ab-wall',  icon: 'flame',  tip: 'Wall-clock icicle (reverse).' },
-  'lock-forward':    { label: 'Lock',  dir: '↓', cls: 'ab-lock',  icon: 'flame',  tip: 'Lock-contention flamegraph (forward): call stacks holding or waiting on monitors.' },
+  'lock-forward':    { label: 'Lock',  dir: '↓', cls: 'ab-lock',  icon: 'flame',  tip: 'Lock-contention flamegraph (forward).' },
   'lock-reverse':    { label: 'Lock',  dir: '↑', cls: 'ab-lock',  icon: 'flame',  tip: 'Lock-contention icicle (reverse).' },
   'cpu':             { label: 'CPU',   dir: '',  cls: 'ab-cpu',   icon: 'flame',  tip: 'CPU flamegraph.' },
   'alloc':           { label: 'Alloc', dir: '',  cls: 'ab-alloc', icon: 'flame',  tip: 'Allocation flamegraph.' },
   'wall':            { label: 'Wall',  dir: '',  cls: 'ab-wall',  icon: 'flame',  tip: 'Wall-clock flamegraph.' },
   'lock':            { label: 'Lock',  dir: '',  cls: 'ab-lock',  icon: 'flame',  tip: 'Lock-contention flamegraph.' },
-  'cpu-collapsed':   { label: 'CPU',   dir: 'stacks', cls: 'ab-cpu',   icon: 'stacks', tip: 'Raw collapsed CPU stack traces — input data for flamegraph generation tools.' },
+  'cpu-collapsed':   { label: 'CPU',   dir: 'stacks', cls: 'ab-cpu',   icon: 'stacks', tip: 'Raw collapsed CPU stack traces.' },
   'alloc-collapsed': { label: 'Alloc', dir: 'stacks', cls: 'ab-alloc', icon: 'stacks', tip: 'Raw collapsed allocation stack traces.' },
   'wall-collapsed':  { label: 'Wall',  dir: 'stacks', cls: 'ab-wall',  icon: 'stacks', tip: 'Raw collapsed wall-clock stack traces.' },
   'lock-collapsed':  { label: 'Lock',  dir: 'stacks', cls: 'ab-lock',  icon: 'stacks', tip: 'Raw collapsed lock-contention stack traces.' },
-  'jfr':             { label: 'JFR',   dir: '',  cls: 'ab-jfr',  icon: 'record', tip: 'Java Flight Recorder recording — open with JDK Mission Control or async-profiler converter.' },
+  'jfr':             { label: 'JFR',   dir: '',  cls: 'ab-jfr',  icon: 'record', tip: 'Java Flight Recorder recording.' },
 };
 
 function _artifactBadge(href, meta) {
@@ -801,15 +862,66 @@ function _artifactBadge(href, meta) {
   return `<a href="${esc(href)}" class="ab ${esc(meta.cls)}" title="${esc(meta.tip)}" target="_blank" rel="noopener">${_IC[meta.icon]}${esc(meta.label)}${dir}</a>`;
 }
 
-function _runArtifactsHtml(r) {
-  const badges = r.profiles.map(p => {
+function _profileBadgesHtml(profiles) {
+  return profiles.map(p => {
     const meta = PROFILE_META[p.event] || { label: p.event, dir: '', cls: 'ab-data', icon: 'data', tip: p.event };
     return _artifactBadge(p.file_path, meta);
   }).join('');
+}
+
+function _runArtifactsHtml(r) {
+  const badges = _profileBadgesHtml(r.profiles);
   const jmh = r.jmh_json_path
     ? `<a href="${esc(r.jmh_json_path)}" class="ab ab-data" title="Raw JMH JSON results" target="_blank" rel="noopener">${_IC.data}JSON</a>`
     : '';
   return badges || jmh ? `<div class="artifact-grid">${badges}${jmh}</div>` : '';
+}
+
+function _diffBadgesHtml(diffsByVs) {
+  // diffsByVs: { "previous": [{diff_path, ...}, ...], "branch-base": [...], ... }
+  if (!diffsByVs || Object.keys(diffsByVs).length === 0) return '';
+  const LABELS = { 'previous': 'vs prev', 'branch-base': 'vs base', 'on-demand': 'on-demand' };
+  let html = '';
+  for (const [vs, diffs] of Object.entries(diffsByVs)) {
+    const label = LABELS[vs] || vs;
+    const badges = diffs.map(d => {
+      const name = d.diff_path.split('/').pop();
+      return `<a href="${esc(d.diff_path)}" class="ab ab-diff" title="Diff ${esc(label)}: ${esc(name)}" target="_blank" rel="noopener">⊕ ${esc(name)}</a>`;
+    }).join('');
+    html += `<div class="artifact-section"><div class="artifact-label">${esc(label)}</div><div class="artifact-grid">${badges}</div></div>`;
+  }
+  return html;
+}
+
+function _commitArtifactsHtml(c) {
+  const latestRun = c.runs.length > 0 ? c.runs[c.runs.length - 1] : null;
+  let html = '';
+
+  // Bench profiles (incidental, from latest bench run)
+  if (c.latest_bench_profiles && c.latest_bench_profiles.length > 0) {
+    const badges = _profileBadgesHtml(c.latest_bench_profiles);
+    const jmh = latestRun?.jmh_json_path
+      ? `<a href="${esc(latestRun.jmh_json_path)}" class="ab ab-data" title="Raw JMH JSON" target="_blank" rel="noopener">${_IC.data}JSON</a>`
+      : '';
+    if (badges || jmh) {
+      html += `<div class="artifact-section"><div class="artifact-label">bench</div><div class="artifact-grid">${badges}${jmh}</div></div>`;
+    }
+  } else if (latestRun?.jmh_json_path) {
+    html += `<div class="artifact-grid"><a href="${esc(latestRun.jmh_json_path)}" class="ab ab-data" title="Raw JMH JSON" target="_blank" rel="noopener">${_IC.data}JSON</a></div>`;
+  }
+
+  // Profile profiles (fixed-workload, from latest profile run)
+  if (c.latest_profile_profiles && c.latest_profile_profiles.length > 0) {
+    const badges = _profileBadgesHtml(c.latest_profile_profiles);
+    html += `<div class="artifact-section"><div class="artifact-label">profile</div><div class="artifact-grid">${badges}</div></div>`;
+  }
+
+  // Pre-computed diffs
+  if (c.diffs_by_vs) {
+    html += _diffBadgesHtml(c.diffs_by_vs);
+  }
+
+  return html;
 }
 
 function esc(s) {
@@ -818,19 +930,121 @@ function esc(s) {
     .replace(/"/g,'&quot;');
 }
 
+// ── Compare / server-mode UI ─────────────────────────────────────────────────
+const selectedForCompare = new Set();
 
+function _updateCompareBar() {
+  const bar = document.getElementById('compare-bar');
+  const btn = document.getElementById('compare-btn');
+  const lbl = document.getElementById('compare-label');
+  const n = selectedForCompare.size;
+  if (!serverMode || n === 0) { bar.classList.remove('visible'); return; }
+  bar.classList.add('visible');
+  lbl.textContent = n === 1 ? 'Select 1 more commit' : `${n} commits selected`;
+  btn.disabled = n !== 2;
+}
+
+function clearCompare() {
+  selectedForCompare.clear();
+  document.querySelectorAll('.compare-cb').forEach(cb => { cb.checked = false; });
+  _updateCompareBar();
+}
+
+function closeDiffPanel() {
+  document.getElementById('diff-panel').classList.remove('visible');
+}
+
+async function runCompare() {
+  const [left, right] = [...selectedForCompare];
+  const btn = document.getElementById('compare-btn');
+  btn.textContent = 'Running…';
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/api/diff', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ left_sha: left, right_sha: right }),
+    });
+    const data = await resp.json();
+    _showDiffResults(left, right, data.diffs || []);
+  } catch (e) {
+    showToast('Diff request failed: ' + e.message);
+  } finally {
+    btn.textContent = 'Compare';
+    btn.disabled = false;
+  }
+}
+
+function _showDiffResults(left, right, diffs) {
+  const panel = document.getElementById('diff-panel');
+  const body = document.getElementById('diff-panel-body');
+  const title = document.getElementById('diff-panel-title');
+  title.textContent = `${left.slice(0,8)} → ${right.slice(0,8)}`;
+  body.innerHTML = '';
+  if (!diffs.length) {
+    body.innerHTML = '<span style="color:#484f58;font-size:0.82rem">No diff output. Check [diff] config and that both commits have profile artifacts.</span>';
+  } else {
+    for (const d of diffs) {
+      const name = d.diff_path.split('/').pop();
+      const ext = name.split('.').pop().toLowerCase();
+      const wrap = document.createElement('div');
+      wrap.className = 'diff-frame-wrap';
+      const badge = document.createElement('a');
+      badge.href = d.diff_path;
+      badge.className = 'ab ab-diff';
+      badge.target = '_blank';
+      badge.rel = 'noopener';
+      badge.textContent = '⊕ ' + name;
+      wrap.appendChild(badge);
+      if (ext === 'html' || ext === 'svg') {
+        const iframe = document.createElement('iframe');
+        iframe.src = d.diff_path;
+        wrap.appendChild(iframe);
+      }
+      body.appendChild(wrap);
+    }
+  }
+  panel.classList.add('visible');
+}
+
+// ── Diff panel resize drag ────────────────────────────────────────────────────
+(function () {
+  const handle = document.getElementById('diff-panel-resize');
+  const panel  = document.getElementById('diff-panel');
+  if (!handle || !panel) return;
+  let startY = 0, startH = 0;
+  handle.addEventListener('mousedown', e => {
+    e.preventDefault();
+    startY = e.clientY;
+    startH = panel.offsetHeight;
+    handle.classList.add('dragging');
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+  function onMove(e) {
+    const delta = startY - e.clientY;
+    const clamped = Math.max(120, Math.min(window.innerHeight - 60, startH + delta));
+    panel.style.height = clamped + 'px';
+  }
+  function onUp() {
+    handle.classList.remove('dragging');
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+  }
+})();
+
+// ── Commit table ──────────────────────────────────────────────────────────────
 const tbody = document.getElementById('tbody');
 const rowBySha = {};
 
 for (const c of commits) {
   const runCount = c.runs.length;
-  const isPending = runCount === 0;
+  const isPending = runCount === 0 && (!c.profile_runs || c.profile_runs.length === 0);
   const isInProgress = !!c.in_progress;
   const commitTr = document.createElement('tr');
   commitTr.className = 'commit-row' + (isPending ? ' pending' : '') + (isInProgress ? ' in-progress' : '');
   commitTr.id = 'commit-' + c.short_sha;
 
-  // Test cell
   let testCell = '<span class="na">—</span>';
   if (c.latest_test !== null && c.latest_test !== undefined) {
     testCell = c.latest_test.passed
@@ -838,12 +1052,18 @@ for (const c of commits) {
       : '<span class="fail">✗</span>';
   }
 
+  const totalRuns = runCount + (c.profile_runs ? c.profile_runs.length : 0);
   const runLabel = isPending
     ? '<span class="na">pending</span>'
-    : `${runCount} run${runCount !== 1 ? 's' : ''} <span class="toggle">[expand]</span>`;
+    : `${totalRuns} run${totalRuns !== 1 ? 's' : ''} <span class="toggle">[expand]</span>`;
 
-  const latestRun = c.runs.length > 0 ? c.runs[c.runs.length - 1] : null;
-  const latestArtifactsHtml = latestRun ? _runArtifactsHtml(latestRun) : '';
+  const artifactsHtml = _commitArtifactsHtml(c);
+
+  // Compare checkbox (server mode only)
+  const cbHtml = serverMode
+    ? `<input type="checkbox" class="compare-cb" style="margin-right:0.3rem" title="Select for comparison"
+         onchange="(function(sha,cb){if(cb.checked){selectedForCompare.add(sha)}else{selectedForCompare.delete(sha)};_updateCompareBar()})('${esc(c.sha)}',this)">`
+    : '';
 
   const shaLink = githubUrl
     ? `<a href="${githubUrl}/commit/${esc(c.sha)}" target="_blank" rel="noopener"
@@ -855,21 +1075,22 @@ for (const c of commits) {
     >⎘</button>`;
   const progressSpinner = isInProgress ? '<span class="progress-spinner"></span>' : '';
   commitTr.innerHTML = `
-    <td style="white-space:nowrap">${progressSpinner}${shaLink} ${copyBtn}</td>
+    <td style="white-space:nowrap">${cbHtml}${progressSpinner}${shaLink} ${copyBtn}</td>
     <td>${esc(c.message.substring(0, 72))}</td>
     <td style="white-space:nowrap">${esc(c.ts)}</td>
     <td>${testCell}</td>
     <td></td>
-    <td>${latestArtifactsHtml ? `<div class="commit-artifacts" style="margin-bottom:0.35rem">${latestArtifactsHtml}</div>` : ''}${runLabel}</td>
+    <td>${artifactsHtml ? `<div class="commit-artifacts" style="margin-bottom:0.35rem">${artifactsHtml}</div>` : ''}${runLabel}</td>
   `;
   tbody.appendChild(commitTr);
 
-  // Score cell — populated dynamically via scoreUpdaters
   const scoreTd = commitTr.cells[4];
   renderScoreCell(scoreTd, c);
   scoreUpdaters.push(() => renderScoreCell(scoreTd, c));
 
   const runRows = [];
+
+  // ── Bench run rows ────────────────────────────────────────────────────────
   for (const r of c.runs) {
     const testStatus = r.test === null
       ? '<span class="na">—</span>'
@@ -895,7 +1116,7 @@ for (const c of commits) {
     tr.className = 'run-row hidden';
     tr.innerHTML = `
       <td colspan="3">
-        <div class="run-meta">Run #${r.run_index} &nbsp;·&nbsp; ${esc(r.run_at)}${reusedBadge}</div>
+        <div class="run-meta">Bench run #${r.run_index} &nbsp;·&nbsp; ${esc(r.run_at)}${reusedBadge}</div>
         ${r.test_cmd ? '<div class="cmd">test: ' + esc(r.test_cmd) + '</div>' : ''}
         ${r.bench_cmd ? '<div class="cmd">bench: ' + esc(r.bench_cmd) + '</div>' : ''}
         ${testOutputBlock}
@@ -908,7 +1129,6 @@ for (const c of commits) {
     tbody.appendChild(tr);
     runRows.push(tr);
 
-    // Run-row bench cell: dynamic so it respects the benchmark group filter.
     const runBenchTd = tr.cells[2];
     function renderRunBenchCell() {
       let scores = r.scores;
@@ -934,6 +1154,33 @@ for (const c of commits) {
     scoreUpdaters.push(renderRunBenchCell);
   }
 
+  // ── Profile run rows ──────────────────────────────────────────────────────
+  for (const r of (c.profile_runs || [])) {
+    const artifactsHtml = r.profiles.map(p => {
+      const meta = PROFILE_META[p.event] || { label: p.event, dir: '', cls: 'ab-data', icon: 'data', tip: p.event };
+      return _artifactBadge(p.file_path, meta);
+    }).join('');
+
+    const outputBlock = r.bench_output
+      ? `<details><summary>profile output</summary><pre class="output">${esc(r.bench_output)}</pre></details>`
+      : '';
+
+    const tr = document.createElement('tr');
+    tr.className = 'run-row hidden';
+    tr.innerHTML = `
+      <td colspan="3">
+        <div class="run-meta">Profile run #${r.run_index} &nbsp;·&nbsp; ${esc(r.run_at)}</div>
+        ${r.profile_cmd ? '<div class="cmd">profile: ' + esc(r.profile_cmd) + '</div>' : ''}
+        ${outputBlock}
+      </td>
+      <td><span class="na">—</span></td>
+      <td><span class="na">—</span></td>
+      <td>${artifactsHtml ? `<div class="artifact-grid">${artifactsHtml}</div>` : ''}</td>
+    `;
+    tbody.appendChild(tr);
+    runRows.push(tr);
+  }
+
   function setExpanded(expanded) {
     runRows.forEach(tr => tr.classList.toggle('hidden', !expanded));
     const toggle = commitTr.querySelector('.toggle');
@@ -945,7 +1192,6 @@ for (const c of commits) {
   rowBySha[c.short_sha] = setExpanded;
 
   commitTr.addEventListener('click', () => {
-    // Don't toggle when the user is selecting text (e.g. copying the SHA)
     if (window.getSelection()?.toString()) return;
     const expanding = runRows[0]?.classList.contains('hidden');
     setExpanded(expanding);
@@ -956,7 +1202,7 @@ for (const c of commits) {
   });
 }
 
-// Live log: poll running.js while a run is in progress
+// ── Live log ──────────────────────────────────────────────────────────────────
 (function() {
   const panel = document.getElementById('live-log');
   const pre   = document.getElementById('live-log-pre');
@@ -968,7 +1214,6 @@ for (const c of commits) {
     const log = window.__runLog;
     if (!log || !log.length) { panel.style.display = 'none'; return; }
     panel.style.display = 'block';
-    // Keep scroll pinned to bottom unless user has scrolled up
     const atBottom = pre.scrollHeight - pre.scrollTop <= pre.clientHeight + 4;
     pre.textContent = log.map(e => {
       const d = new Date(e.ts * 1000);
@@ -1004,13 +1249,11 @@ for (const c of commits) {
     if (spinner) spinner.style.animation = 'none';
   }
 
-  // Initial render from the already-loaded script tag
   render();
   if (!commits.some(c => c.in_progress)) {
     if (spinner) spinner.style.animation = 'none';
   }
 
-  // Poll only when a run is active; pause when tab is hidden
   if (commits.some(c => c.in_progress) || (window.__runLog && window.__runLog.length)) {
     startPolling();
   }
@@ -1020,7 +1263,7 @@ for (const c of commits) {
   });
 })();
 
-// Restore all URL state (including on back/forward navigation)
+// ── URL state restore ─────────────────────────────────────────────────────────
 function applyUrlState() {
   const { mode, runs, sec, bms, shas } = _parseUrlState();
   chartMode = mode;
@@ -1029,12 +1272,12 @@ function applyUrlState() {
   runsMode = runs;
   const runsSel = document.getElementById('runs-mode');
   runsSel.value = runs;
-  if (runsSel.value !== runs) runsMode = 'latest'; // run index no longer exists
+  if (runsSel.value !== runs) runsMode = 'latest';
   secondaryMetric = sec;
   document.getElementById('secondary-mode').value = sec;
   selectedBenchmarks.clear();
   for (const b of bms) selectedBenchmarks.add(b);
-  _applyBenchmarkFilter(); // updates buttons, chart visibility, score cells
+  _applyBenchmarkFilter();
   chartRenderers.forEach(r => r(chartMode, runsMode, secondaryMetric));
   for (const [sha, fn] of Object.entries(rowBySha)) fn(shas.has(sha));
   if (shas.size) {
