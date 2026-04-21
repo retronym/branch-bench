@@ -17,6 +17,22 @@ Results are stored in a SQLite database and never discarded. Multiple runs per c
 
 ---
 
+## Why this exists
+
+Micro-optimisation work runs into a specific problem: the improvement you are trying to measure is often the same order of magnitude as the noise in the measurement. A 3% speedup and a lucky run look identical in a single JMH result. `branch-bench` is built around that reality.
+
+**Multiple summary modes.** Switch between mean ± 99% CI, median, min, and max. For highly skewed workloads, median is a more stable signal than mean; min is useful for latency work where you care about best-case behaviour or where the benchmarking takes place on a developer machine with some level of competing processes; max surfaces tail effects. The [report section](#report) describes all available modes.
+
+**Distribution-aware visualisation.** The 'raw points' view plots every JMH iteration as a raw point (jittered to avoid overlap), with a summary box overlay showing min / median / max. Variance, skew, and multimodal distributions are immediately visible — the kind of shape information that a mean-and-CI bar chart suppresses.
+
+**Multi-run aggregation.** Re-run the same commits with `--sha HEAD~N..HEAD --all` and switch the report to *Aggregate* mode. This pools raw iteration data across all runs and recomputes statistics from the full sample — equivalent to having run more JMH forks, and a practical way to build confidence in a result on a noisy machine.
+
+**Secondary metric overlays.** Add `-prof gc` to your bench command and the report can overlay `gc.alloc.rate.norm` (or any other secondary metric) on a right-hand axis alongside throughput or latency. When a benchmark moves, this makes it easier to tell whether the change is compute-bound or allocation-driven.
+
+**Rebase-safe result storage.** Results are keyed on git tree SHA, not commit SHA. Squash, reorder, or amend commits during active branch development and existing benchmark data is reattached to the rewritten commits automatically — no re-run needed unless the source actually changed, so certain branch curation operations can be done without wiping the slate clean.
+
+---
+
 ## Installation
 
 Requires Python 3.11+. Install with [pipx](https://pipx.pypa.io/) for an isolated global CLI:
