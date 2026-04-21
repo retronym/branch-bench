@@ -217,7 +217,11 @@ class Store:
 
     def all_epochs(self) -> list[int]:
         rows = self._conn.execute(
-            "SELECT DISTINCT epoch FROM commits ORDER BY epoch"
+            """SELECT epoch FROM (
+                 SELECT DISTINCT epoch FROM commits
+                 UNION
+                 SELECT DISTINCT epoch FROM runs
+               ) ORDER BY epoch"""
         ).fetchall()
         return [r[0] for r in rows if r[0] > 0]
 
@@ -555,8 +559,21 @@ class Store:
 
     def all_commits(self) -> list[dict]:
         epoch = self.current_epoch()
+        # Use commits.epoch first (fast path); fall back to joining through runs
+        # so that epochs whose commit rows were overwritten by a later epoch still work.
         rows = self._conn.execute(
             "SELECT sha, short_sha, message, author, timestamp, branch FROM commits WHERE epoch=? ORDER BY position ASC",
+            (epoch,),
+        ).fetchall()
+        if rows:
+            return [dict(zip(["sha", "short_sha", "message", "author", "timestamp", "branch"], r)) for r in rows]
+        # Fallback: find commits referenced by runs for this epoch
+        rows = self._conn.execute(
+            """SELECT DISTINCT c.sha, c.short_sha, c.message, c.author, c.timestamp, c.branch
+               FROM commits c
+               JOIN runs r ON r.commit_sha = c.sha
+               WHERE r.epoch = ?
+               ORDER BY c.timestamp ASC""",
             (epoch,),
         ).fetchall()
         return [dict(zip(["sha", "short_sha", "message", "author", "timestamp", "branch"], r)) for r in rows]

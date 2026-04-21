@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 import webbrowser
 from pathlib import Path
@@ -147,6 +148,7 @@ def run(
         raise SystemExit(1)
     cfg = load_config(config_path)
     store = Store(cfg.db_path(), epoch_override=epoch_override)
+    click.echo(f"branch-bench run  epoch={store.current_epoch()}  branch={cfg.repo.branch}")
 
     if run_diff and strategy != "linear":
         click.echo("Note: --diff is only effective with --strategy linear; ignoring.")
@@ -574,6 +576,7 @@ def serve(config: str, port: int, epoch_override: int | None) -> None:
 
 def _run_server(cfg, epoch: int, epoch_dir: Path, report_html: Path, port: int) -> None:
     """Start a stdlib-based HTTP server with diff API."""
+    import html as _html
     import http.server
     import json
     import mimetypes
@@ -591,6 +594,64 @@ def _run_server(cfg, epoch: int, epoch_dir: Path, report_html: Path, port: int) 
     )
 
     repo_path = Path(cfg.repo.path).resolve()
+    epoch_dir_resolved = epoch_dir.resolve()
+    _DISPLAYABLE = {".svg", ".html", ".htm", ".txt"}
+
+    def _rebase(path_str: str) -> str:
+        try:
+            return str(Path(path_str).resolve().relative_to(epoch_dir_resolved))
+        except ValueError:
+            return path_str
+
+    def _displayable_profiles(store, sha: str) -> list[dict]:
+        return [
+            {**p, "file_path": _rebase(p["file_path"])}
+            for p in store.best_profiles_for_commit(sha)
+            if Path(p["file_path"]).suffix.lower() in _DISPLAYABLE
+        ]
+
+    def _diff_view_html(tabs: list[tuple[str, str, str]], title: str) -> str:
+        """Generate a standalone full-screen diff-view page.
+        tabs = [(view_id, label, path), ...]
+        """
+        he = _html.escape
+        default = tabs[0][0] if tabs else ""
+        tabs_html = ""
+        frames_html = ""
+        for tid, tlabel, tpath in tabs:
+            act = " active" if tid == default else ""
+            hid = "" if tid == default else " hidden"
+            tabs_html += (
+                f'<button class="tab{act}" data-view="{he(tid)}">{he(tlabel)}</button>'
+                f'<a href="{he(tpath)}" class="ext" target="_blank" rel="noopener" title="Open file">↗</a>'
+            )
+            frames_html += f'<iframe src="{he(tpath)}" data-view="{he(tid)}" class="{hid.strip()}"></iframe>'
+        return f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><base href="/"><title>{he(title)}</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:#0d1117;color:#e6edf3;font-family:system-ui,sans-serif;height:100vh;display:flex;flex-direction:column}}
+#hdr{{display:flex;align-items:center;gap:0.3rem;padding:0.35rem 0.75rem;background:#161b22;border-bottom:1px solid #30363d;flex-shrink:0;flex-wrap:wrap}}
+.tab{{background:none;border:1px solid #30363d;color:#8b949e;border-radius:4px;padding:0.2rem 0.55rem;cursor:pointer;font-size:0.75rem;font-family:monospace}}
+.tab:hover{{color:#e6edf3}}.tab.active{{color:#e6edf3;background:#21262d;border-color:#388bfd88}}
+.ext{{font-size:0.65rem;color:#484f58;text-decoration:none;margin-right:0.35rem}}.ext:hover{{color:#58a6ff}}
+#body{{flex:1;position:relative;min-height:0}}
+iframe{{position:absolute;inset:0;width:100%;height:100%;border:none;transition:opacity 0.1s}}
+iframe.hidden{{opacity:0;pointer-events:none}}
+</style></head>
+<body>
+<div id="hdr">{tabs_html}</div>
+<div id="body">{frames_html}</div>
+<script>
+document.getElementById('hdr').addEventListener('click',function(e){{
+  const btn=e.target.closest('.tab');if(!btn)return;
+  const v=btn.dataset.view;
+  document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b.dataset.view===v));
+  document.querySelectorAll('#body iframe').forEach(f=>f.classList.toggle('hidden',f.dataset.view!==v));
+}});
+</script>
+</body></html>"""
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
@@ -608,13 +669,35 @@ def _run_server(cfg, epoch: int, epoch_dir: Path, report_html: Path, port: int) 
             path = parsed.path.lstrip("/")
 
             if path in ("", "index.html"):
-                self._send(200, "text/html; charset=utf-8", _report_injected.encode())
+                qs = urllib.parse.parse_qs(parsed.query)
+                req_epoch_str = qs.get("epoch", [""])[0]
+                if req_epoch_str.isdigit() and int(req_epoch_str) != epoch:
+                    other_epoch = int(req_epoch_str)
+                    other_report = cfg.report_path(other_epoch)
+                    if other_report.exists():
+                        other_src = other_report.read_text(encoding="utf-8")
+                        other_injected = other_src.replace(
+                            "window.__runLog=[];",
+                            f"window.__runLog=[];\nwindow.__serverMode=true;\nwindow.__serverEpoch={other_epoch};",
+                            1,
+                        )
+                        self._send(200, "text/html; charset=utf-8", other_injected.encode())
+                    else:
+                        self._send(404, "text/plain",
+                                   f"Epoch {other_epoch} report not found. Run `branch-bench report --epoch {other_epoch}` first.".encode())
+                else:
+                    self._send(200, "text/html; charset=utf-8", _report_injected.encode())
                 return
 
-            if path == "api/diffs":
+            if path == "api/report-mtime":
+                mtime = report_html.stat().st_mtime if report_html.exists() else 0
+                self._send(200, "application/json", json.dumps({"mtime": mtime}).encode())
+                return
+
+            if path in ("api/diffs", "api/diff-view"):
                 qs = urllib.parse.parse_qs(parsed.query)
-                left_prefix = (qs.get("left", [""])[0])
-                right_prefix = (qs.get("right", [""])[0])
+                left_prefix = qs.get("left", [""])[0]
+                right_prefix = qs.get("right", [""])[0]
                 store = _Store(cfg.db_path(), epoch_override=epoch)
                 try:
                     all_commits = git.list_commits(
@@ -627,15 +710,37 @@ def _run_server(cfg, epoch: int, epoch_dir: Path, report_html: Path, port: int) 
                         self._send(404, "application/json", json.dumps({"error": "commit not found"}).encode())
                         return
                     raw_diffs = store.diffs_for_pair(left_commit.sha, right_commit.sha)
-                    epoch_dir_resolved = epoch_dir.resolve()
-                    rebased = []
-                    for d in raw_diffs:
-                        try:
-                            rel = Path(d["diff_path"]).resolve().relative_to(epoch_dir_resolved)
-                            rebased.append({**d, "diff_path": str(rel)})
-                        except ValueError:
-                            rebased.append(d)
-                    self._send(200, "application/json", json.dumps({"diffs": rebased}).encode())
+                    rebased = [{**d, "diff_path": _rebase(d["diff_path"])} for d in raw_diffs]
+                    lprofs = _displayable_profiles(store, left_commit.sha)
+                    rprofs = _displayable_profiles(store, right_commit.sha)
+
+                    if path == "api/diff-view":
+                        # Build full-screen view from URL params
+                        def _slot(key):
+                            v = qs.get(key, [""])[0]
+                            return urllib.parse.unquote(v) if v else ""
+                        tabs = []
+                        lsha8 = left_commit.short_sha
+                        rsha8 = right_commit.short_sha
+                        def _fname(p): return p.split("/")[-1] if p else ""
+                        def _fstem(p): n = _fname(p); return n[:n.rfind(".")] if "." in n else n
+                        stem = _fstem(_slot("diff") or _slot("lart") or _slot("rart") or "")
+                        lname = _fname(_slot("lart")); rname = _fname(_slot("rart"))
+                        llabel = f"LEFT-{lsha8}" + (f" · {lname}" if lname else "")
+                        rlabel = f"RIGHT-{rsha8}" + (f" · {rname}" if rname else "")
+                        if _slot("lart"): tabs.append(("left", llabel, _slot("lart")))
+                        if _slot("diff"): tabs.append(("diff", "DIFF",   _slot("diff")))
+                        if _slot("inv"):  tabs.append(("inv",  "DIFF⁻¹", _slot("inv")))
+                        if _slot("rart"): tabs.append(("right", rlabel, _slot("rart")))
+                        if not tabs:
+                            self._send(400, "text/plain", b"No views specified")
+                            return
+                        title = f"{lsha8} vs {rsha8}" + (f" · {stem}" if stem else "")
+                        html_body = _diff_view_html(tabs, title)
+                        self._send(200, "text/html; charset=utf-8", html_body.encode())
+                    else:
+                        resp_body = json.dumps({"diffs": rebased, "left_profiles": lprofs, "right_profiles": rprofs}).encode()
+                        self._send(200, "application/json", resp_body)
                 finally:
                     store.close()
                 return
@@ -699,17 +804,15 @@ def _run_server(cfg, epoch: int, epoch_dir: Path, report_html: Path, port: int) 
                 )
 
                 raw_diffs = store.diffs_for_pair(left_commit.sha, right_commit.sha)
-                # Rebase diff_path to be epoch-dir-relative so the browser
-                # can request them from this server (which serves under epoch_dir).
-                epoch_dir_resolved = epoch_dir.resolve()
-                rebased = []
-                for d in raw_diffs:
-                    try:
-                        rel = Path(d["diff_path"]).resolve().relative_to(epoch_dir_resolved)
-                        rebased.append({**d, "diff_path": str(rel)})
-                    except ValueError:
-                        rebased.append(d)
-                resp = json.dumps({"diffs": rebased, "log": messages}).encode()
+                rebased = [{**d, "diff_path": _rebase(d["diff_path"])} for d in raw_diffs]
+                lprofs = _displayable_profiles(store, left_commit.sha)
+                rprofs = _displayable_profiles(store, right_commit.sha)
+                resp = json.dumps({
+                    "diffs": rebased,
+                    "left_profiles": lprofs,
+                    "right_profiles": rprofs,
+                    "log": messages,
+                }).encode()
                 self._send(200, "application/json", resp)
             finally:
                 store.close()

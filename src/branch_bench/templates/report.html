@@ -114,16 +114,32 @@
   }
   #diff-panel-close:hover { color: #e6edf3; }
   #diff-panel-body {
-    overflow-y: auto; padding: 0.75rem 1rem;
-    display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: flex-start;
+    flex: 1 1 0; min-height: 0; overflow-y: auto; padding: 0.75rem 1rem;
+    display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: stretch; align-content: stretch;
   }
-  .diff-frame-wrap {
+  /* ── Diff widget (LEFT | DIFF | RIGHT tabs) ── */
+  .diff-widget {
     display: flex; flex-direction: column; flex: 1 1 560px; min-width: 280px;
-    gap: 0.3rem; min-height: 0;
+    min-height: 0; gap: 0.3rem;
   }
-  .diff-frame-wrap iframe {
-    flex: 1 1 auto; min-height: 200px; border: 1px solid #30363d;
-    border-radius: 4px; background: #fff;
+  .dw-stem { font-size: 0.72rem; font-family: monospace; color: #8b949e; padding: 0.18rem 0.4rem; margin-right: 0.15rem; border-right: 1px solid #30363d; }
+  .dw-tabs { display: flex; gap: 0.25rem; align-items: center; flex-wrap: wrap; }
+  .dw-tab {
+    background: none; border: 1px solid #30363d; color: #8b949e;
+    border-radius: 4px; padding: 0.18rem 0.5rem; cursor: pointer;
+    font-size: 0.72rem; font-family: monospace;
+  }
+  .dw-tab:hover { color: #e6edf3; }
+  .dw-tab.active { color: #e6edf3; background: #21262d; border-color: #388bfd88; }
+  .dw-tab-diff { color: #f0883e; background: #2a1500; border-color: #f0883e55; }
+  .dw-tab-diff:hover { color: #f0883e; border-color: #f0883e; }
+  .dw-tab-diff.active { color: #f0883e; background: #3a2000; border-color: #f0883e; }
+  .dw-open { font-size: 0.65rem; color: #484f58; text-decoration: none; margin-left: 0.1rem; margin-right: 0.3rem; }
+  .dw-open:hover { color: #58a6ff; }
+  .dw-body { flex: 1 1 auto; min-height: 200px; position: relative; }
+  .dw-body iframe {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    border: 1px solid #30363d; border-radius: 4px; background: #fff;
   }
   /* ── Compare button (server mode) ── */
   #compare-bar {
@@ -169,6 +185,18 @@
     transition: opacity 0.15s;
   }
   #toast.show { opacity: 1; }
+  #report-stale {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 200;
+    background: #1c2128; border-bottom: 1px solid #f0883e55;
+    color: #f0883e; font-size: 0.8rem; font-family: monospace;
+    padding: 0.35rem 1rem; display: none; align-items: center; gap: 0.75rem;
+  }
+  #report-stale.show { display: flex; }
+  #report-stale button {
+    background: #f0883e; color: #0d1117; border: none; border-radius: 4px;
+    padding: 0.15rem 0.6rem; cursor: pointer; font-size: 0.78rem; font-weight: 600;
+  }
+  #report-stale button:hover { background: #e07830; }
   pre.output {
     margin: 0.4rem 0 0;
     padding: 0.6rem 0.75rem;
@@ -262,6 +290,10 @@
 </head>
 <body>
 <div id="toast"></div>
+<div id="report-stale">
+  ⚠ Report updated — <button onclick="location.reload()">Refresh</button>
+  <span style="margin-left:auto;cursor:pointer;color:#8b949e" onclick="this.parentElement.classList.remove('show')" title="Dismiss">✕</span>
+</div>
 
 <!-- Compare bar (server mode only) -->
 <div id="compare-bar">
@@ -471,7 +503,8 @@ function _applyBenchmarkFilter() {
   for (const e of epochLinks) {
     const li = document.createElement('li');
     if (e.epoch === currentEpoch) li.className = 'current';
-    li.innerHTML = `<a href="${esc(e.path)}">Epoch ${e.epoch}${e.epoch === currentEpoch ? ' ✓' : ''}</a>`;
+    const href = serverMode ? `/?epoch=${e.epoch}` : e.path;
+    li.innerHTML = `<a href="${esc(href)}">Epoch ${e.epoch}${e.epoch === currentEpoch ? ' ✓' : ''}</a>`;
     list.appendChild(li);
   }
   if (epochLinks.length <= 1) {
@@ -913,19 +946,37 @@ function _runArtifactsHtml(r) {
 }
 
 function _diffBadgesHtml(diffsByVs) {
-  // diffsByVs: { "previous": [{diff_path, ...}, ...], "branch-base": [...], ... }
+  // diffsByVs: { "previous": [{left_sha, right_sha, diff_path, ...}, ...], ... }
   if (!diffsByVs || Object.keys(diffsByVs).length === 0) return '';
-  const LABELS = { 'previous': 'vs prev', 'branch-base': 'vs base', 'on-demand': 'on-demand' };
-  let html = '';
+  const LABELS = { 'previous': 'vs prev', 'branch-base': 'vs base' };
+  let buttons = '';
   for (const [vs, diffs] of Object.entries(diffsByVs)) {
-    const label = LABELS[vs] || vs;
-    const badges = diffs.map(d => {
-      const name = d.diff_path.split('/').pop();
-      return `<a href="${esc(d.diff_path)}" class="ab ab-diff" title="Diff ${esc(label)}: ${esc(name)}" target="_blank" rel="noopener">⊕ ${esc(name)}</a>`;
-    }).join('');
-    html += `<div class="artifact-section"><div class="artifact-label">${esc(label)}</div><div class="artifact-grid">${badges}</div></div>`;
+    if (!diffs.length) continue;
+    const label = LABELS[vs] || `vs ${vs.slice(0, 8)}`;
+    const lsha = esc(diffs[0].left_sha);
+    const rsha = esc(diffs[0].right_sha);
+    buttons += `<button class="ab ab-diff" style="cursor:pointer" onclick="event.stopPropagation();_openAotDiff('${lsha}','${rsha}')">⊕ ${esc(label)}</button>`;
   }
-  return html;
+  return buttons ? `<div class="artifact-section"><div class="artifact-grid">${buttons}</div></div>` : '';
+}
+
+function _openAotDiff(leftSha, rightSha) {
+  if (serverMode) { _fetchAndShowDiffs(leftSha, rightSha); return; }
+  // Static mode: build from embedded commit data
+  const shaMatch = (a, b) => a === b || a.startsWith(b.slice(0, 8)) || b.startsWith(a.slice(0, 8));
+  const leftC  = commits.find(c => shaMatch(c.sha, leftSha));
+  const rightC = commits.find(c => shaMatch(c.sha, rightSha));
+  const diffs = [];
+  if (rightC?.diffs_by_vs) {
+    for (const group of Object.values(rightC.diffs_by_vs))
+      for (const d of group)
+        if (shaMatch(d.left_sha, leftSha)) diffs.push(d);
+  }
+  const _bestProfiles = c => {
+    const profs = c?.latest_profile_profiles?.length ? c.latest_profile_profiles : (c?.latest_bench_profiles ?? []);
+    return profs.filter(p => _VIEWABLE.has(_artExt(p.file_path)));
+  };
+  _showDiffResults(leftSha, rightSha, diffs, _bestProfiles(leftC), _bestProfiles(rightC));
 }
 
 function _commitArtifactsHtml(c) {
@@ -1004,7 +1055,7 @@ async function runCompare() {
       body: JSON.stringify({ left_sha: left, right_sha: right }),
     });
     const data = await resp.json();
-    _showDiffResults(left, right, data.diffs || []);
+    _showDiffResults(left, right, data.diffs || [], data.left_profiles || [], data.right_profiles || []);
   } catch (e) {
     showToast('Diff request failed: ' + e.message);
   } finally {
@@ -1013,37 +1064,209 @@ async function runCompare() {
   }
 }
 
-function _showDiffResults(left, right, diffs) {
+// ── Diff widget helpers ───────────────────────────────────────────────────────
+
+const _VIEWABLE = new Set(['html', 'htm', 'svg', 'txt']);
+
+function _artStem(path) {
+  const name = path.split('/').pop();
+  const dot = name.lastIndexOf('.');
+  return dot >= 0 ? name.slice(0, dot) : name;
+}
+
+function _artExt(path) {
+  const name = path.split('/').pop();
+  const dot = name.lastIndexOf('.');
+  return dot >= 0 ? name.slice(dot + 1).toLowerCase() : '';
+}
+
+function _groupArtifactsAndDiffs(diffs, leftProfiles, rightProfiles, left8, right8) {
+  // groups keyed by base stem: {stem, leftArt, rightArt, forwardDiff, inverseDiff}
+  const groups = new Map();
+
+  function getOrCreate(stem) {
+    if (!groups.has(stem)) groups.set(stem, {stem, leftArt: null, rightArt: null, forwardDiff: null, inverseDiff: null});
+    return groups.get(stem);
+  }
+
+  for (const p of leftProfiles)  { if (_VIEWABLE.has(_artExt(p.file_path))) getOrCreate(_artStem(p.file_path)).leftArt  = p.file_path; }
+  for (const p of rightProfiles) { if (_VIEWABLE.has(_artExt(p.file_path))) getOrCreate(_artStem(p.file_path)).rightArt = p.file_path; }
+
+  for (const d of diffs) {
+    const stem = _artStem(d.diff_path);
+    const isInv = stem.endsWith('-inverse');
+    const base  = isInv ? stem.slice(0, -'-inverse'.length) : stem;
+    if (groups.has(base)) {
+      const g = groups.get(base);
+      if (isInv) g.inverseDiff = d.diff_path; else g.forwardDiff = d.diff_path;
+    } else {
+      // Orphan diff — own entry
+      const g = getOrCreate('__' + d.diff_path);
+      g.stem = base;
+      if (isInv) g.inverseDiff = d.diff_path; else g.forwardDiff = d.diff_path;
+    }
+  }
+  return [...groups.values()];
+}
+
+function _standaloneViewHtml(slots, title) {
+  const he = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+  const def = slots[0]?.id ?? '';
+  let tabsHtml = '', framesHtml = '';
+  for (const s of slots) {
+    const act = s.id === def ? ' active' : '';
+    tabsHtml += `<button class="tab${act}" data-view="${he(s.id)}">${he(s.label)}</button>`
+              + `<a href="${he(s.src)}" class="ext" target="_blank" rel="noopener">↗</a>`;
+    framesHtml += `<iframe src="${he(s.src)}" data-view="${he(s.id)}"${s.id !== def ? ' class="hidden"' : ''}></iframe>`;
+  }
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>${he(title)}</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{background:#0d1117;color:#e6edf3;font-family:system-ui,sans-serif;height:100vh;display:flex;flex-direction:column}#hdr{display:flex;align-items:center;gap:0.3rem;padding:0.35rem 0.75rem;background:#161b22;border-bottom:1px solid #30363d;flex-shrink:0;flex-wrap:wrap}.tab{background:none;border:1px solid #30363d;color:#8b949e;border-radius:4px;padding:0.2rem 0.55rem;cursor:pointer;font-size:0.75rem;font-family:monospace}.tab:hover{color:#e6edf3}.tab.active{color:#e6edf3;background:#21262d;border-color:#388bfd88}.ext{font-size:0.65rem;color:#484f58;text-decoration:none;margin-right:0.35rem}.ext:hover{color:#58a6ff}#body{flex:1;position:relative;min-height:0}iframe{position:absolute;inset:0;width:100%;height:100%;border:none;transition:opacity 0.1s}iframe.hidden{opacity:0;pointer-events:none}</style></head>
+<body><div id="hdr">${tabsHtml}</div><div id="body">${framesHtml}</div>
+<script>document.getElementById('hdr').addEventListener('click',function(e){const btn=e.target.closest('.tab');if(!btn)return;const v=btn.dataset.view;document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b.dataset.view===v));document.querySelectorAll('#body iframe').forEach(f=>f.classList.toggle('hidden',f.dataset.view!==v));});<\/script>
+</body></html>`;
+}
+
+function _buildViewUrl(g, left8, right8) {
+  if (serverMode) {
+    const p = new URLSearchParams();
+    p.set('left', left8); p.set('right', right8);
+    if (g.leftArt)     p.set('lart', g.leftArt);
+    if (g.forwardDiff) p.set('diff', g.forwardDiff);
+    if (g.inverseDiff) p.set('inv',  g.inverseDiff);
+    if (g.rightArt)    p.set('rart', g.rightArt);
+    return '/api/diff-view?' + p.toString();
+  }
+  // Static mode: blob URL with absolute paths so iframes resolve correctly
+  const base = window.location.href.replace(/[?#].*$/, '').replace(/[^/]+$/, '');
+  const toAbs = p => p ? new URL(p, base).href : null;
+  const slots = [
+    g.leftArt     && {id:'left',  label:`LEFT-${left8}`,  src:toAbs(g.leftArt)},
+    g.forwardDiff && {id:'diff',  label:'DIFF',            src:toAbs(g.forwardDiff)},
+    g.inverseDiff && {id:'inv',   label:'DIFF\u207b\u00b9', src:toAbs(g.inverseDiff)},
+    g.rightArt    && {id:'right', label:`RIGHT-${right8}`, src:toAbs(g.rightArt)},
+  ].filter(Boolean);
+  if (!slots.length) return '#';
+  return URL.createObjectURL(new Blob([_standaloneViewHtml(slots, `${left8} vs ${right8}`)], {type:'text/html'}));
+}
+
+function _makeDiffWidget(g, left8, right8) {
+  // Determine ordered slots
+  const ORDER = ['left', 'diff', 'inv', 'right'];
+  const _fname = p => p.split('/').pop();
+  const slots = [
+    g.leftArt     ? {id:'left',  label:`LEFT-${left8}`,  src:g.leftArt,     kind:'side'} : null,
+    g.forwardDiff ? {id:'diff',  label:'DIFF',            src:g.forwardDiff, kind:'diff'} : null,
+    g.inverseDiff ? {id:'inv',   label:'DIFF⁻¹',          src:g.inverseDiff, kind:'diff'} : null,
+    g.rightArt    ? {id:'right', label:`RIGHT-${right8}`, src:g.rightArt,    kind:'side'} : null,
+  ].filter(Boolean);
+
+  if (!slots.length) return null;
+
+  const defaultSlot = slots.find(s => s.id === 'diff') ?? slots.find(s => s.id === 'inv') ?? slots[0];
+  const viewUrl = _buildViewUrl(g, left8, right8);
+
+  const wrap = document.createElement('div');
+  wrap.className = 'diff-widget';
+
+  // Tab bar
+  const tabBar = document.createElement('div');
+  tabBar.className = 'dw-tabs';
+
+  if (g.stem) {
+    const lbl = document.createElement('span');
+    lbl.className = 'dw-stem';
+    lbl.textContent = g.stem;
+    tabBar.appendChild(lbl);
+  }
+
+  for (const s of slots) {
+    const btn = document.createElement('button');
+    btn.className = 'dw-tab' + (s.kind === 'diff' ? ' dw-tab-diff' : '') + (s.id === defaultSlot.id ? ' active' : '');
+    btn.textContent = s.label;
+    btn.dataset.view = s.id;
+    tabBar.appendChild(btn);
+  }
+  // Single open-in-new-tab link for the whole widget
+  const openLink = document.createElement('a');
+  openLink.href = viewUrl;
+  openLink.className = 'dw-open';
+  openLink.target = '_blank';
+  openLink.rel = 'noopener';
+  openLink.title = 'Open full-screen';
+  openLink.textContent = '↗';
+  tabBar.appendChild(openLink);
+
+  // Body with iframes
+  const body = document.createElement('div');
+  body.className = 'dw-body';
+
+  for (const s of slots) {
+    if (!_VIEWABLE.has(_artExt(s.src))) continue;
+    const iframe = document.createElement('iframe');
+    iframe.src = s.src;
+    iframe.dataset.view = s.id;
+    iframe.style.opacity = s.id === defaultSlot.id ? '1' : '0';
+    iframe.style.pointerEvents = s.id === defaultSlot.id ? '' : 'none';
+    // Fallback overlay for blocked iframes
+    const fallback = document.createElement('div');
+    fallback.dataset.fallback = s.id;
+    fallback.style.cssText = 'position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:#0d1117;flex-direction:column;gap:0.5rem';
+    fallback.innerHTML = `<span style="color:#8b949e;font-size:0.82rem">Content could not be displayed inline.</span>`
+      + `<a href="${s.src}" target="_blank" rel="noopener" style="color:#58a6ff;font-size:0.82rem">Open in new tab ↗</a>`;
+    iframe.addEventListener('load', () => {
+      try { if (!iframe.contentDocument) throw 0; }
+      catch {
+        iframe.dataset.blocked = '1';
+        if (iframe.style.opacity === '1') {
+          iframe.style.opacity = '0'; iframe.style.pointerEvents = 'none';
+          fallback.style.display = 'flex';
+        }
+      }
+    });
+    body.appendChild(iframe);
+    body.appendChild(fallback);
+  }
+
+  tabBar.addEventListener('click', e => {
+    const btn = e.target.closest('.dw-tab');
+    if (!btn) return;
+    const v = btn.dataset.view;
+    tabBar.querySelectorAll('.dw-tab').forEach(b => b.classList.toggle('active', b.dataset.view === v));
+    body.querySelectorAll('iframe[data-view]').forEach(f => {
+      const active = f.dataset.view === v, blocked = !!f.dataset.blocked;
+      f.style.opacity = (active && !blocked) ? '1' : '0';
+      f.style.pointerEvents = (active && !blocked) ? '' : 'none';
+      const fb = body.querySelector(`[data-fallback="${f.dataset.view}"]`);
+      if (fb) fb.style.display = (active && blocked) ? 'flex' : 'none';
+    });
+  });
+
+  wrap.appendChild(tabBar);
+  wrap.appendChild(body);
+  return wrap;
+}
+
+function _renderDiffPanel(left, right, diffs, leftProfiles, rightProfiles) {
+  const body = document.getElementById('diff-panel-body');
+  body.innerHTML = '';
+  const left8 = left.slice(0, 8), right8 = right.slice(0, 8);
+  const groups = _groupArtifactsAndDiffs(diffs, leftProfiles, rightProfiles, left8, right8);
+  let rendered = 0;
+  for (const g of groups) {
+    const w = _makeDiffWidget(g, left8, right8);
+    if (w) { body.appendChild(w); rendered++; }
+  }
+  if (!rendered) {
+    body.innerHTML = '<span style="color:#484f58;font-size:0.82rem">No viewable artifacts or diffs found for this pair.</span>';
+  }
+}
+
+function _showDiffResults(left, right, diffs, leftProfiles = [], rightProfiles = []) {
   _diffLeft = left; _diffRight = right;
   replaceUrlState();
   const panel = document.getElementById('diff-panel');
-  const body = document.getElementById('diff-panel-body');
-  const title = document.getElementById('diff-panel-title');
-  title.textContent = `${left.slice(0,8)} → ${right.slice(0,8)}`;
-  body.innerHTML = '';
-  if (!diffs.length) {
-    body.innerHTML = '<span style="color:#484f58;font-size:0.82rem">No diff output. Check [diff] config and that both commits have profile artifacts.</span>';
-  } else {
-    for (const d of diffs) {
-      const name = d.diff_path.split('/').pop();
-      const ext = name.split('.').pop().toLowerCase();
-      const wrap = document.createElement('div');
-      wrap.className = 'diff-frame-wrap';
-      const badge = document.createElement('a');
-      badge.href = d.diff_path;
-      badge.className = 'ab ab-diff';
-      badge.target = '_blank';
-      badge.rel = 'noopener';
-      badge.textContent = '⊕ ' + name;
-      wrap.appendChild(badge);
-      if (ext === 'html' || ext === 'svg') {
-        const iframe = document.createElement('iframe');
-        iframe.src = d.diff_path;
-        wrap.appendChild(iframe);
-      }
-      body.appendChild(wrap);
-    }
-  }
+  document.getElementById('diff-panel-title').textContent = `${left.slice(0,8)} → ${right.slice(0,8)}`;
+  _renderDiffPanel(left, right, diffs, leftProfiles, rightProfiles);
   panel.classList.add('visible');
 }
 
@@ -1305,6 +1528,28 @@ for (const c of commits) {
   });
 })();
 
+// ── Report-stale watcher (server mode only) ───────────────────────────────────
+if (serverMode) (function () {
+  let knownMtime = null, _staleTimer = null;
+  async function checkMtime() {
+    try {
+      const r = await fetch('/api/report-mtime');
+      if (!r.ok) return;
+      const { mtime } = await r.json();
+      if (knownMtime === null) { knownMtime = mtime; return; }
+      if (mtime !== knownMtime) {
+        document.getElementById('report-stale').classList.add('show');
+        stopStale();
+      }
+    } catch {}
+  }
+  function startStale() { if (!_staleTimer) _staleTimer = setInterval(checkMtime, 4000); }
+  function stopStale()  { clearInterval(_staleTimer); _staleTimer = null; }
+  document.addEventListener('visibilitychange', () => document.hidden ? stopStale() : startStale());
+  startStale();
+  checkMtime();
+})();
+
 // ── URL state restore ─────────────────────────────────────────────────────────
 async function _fetchAndShowDiffs(left8, right8) {
   try {
@@ -1312,31 +1557,15 @@ async function _fetchAndShowDiffs(left8, right8) {
     const resp = await fetch(url);
     if (!resp.ok) return;
     const data = await resp.json();
-    if (data.diffs && data.diffs.length > 0) {
-      // Set vars directly to avoid double replaceState during restore
+    const diffs = data.diffs || [];
+    const lp = data.left_profiles || [];
+    const rp = data.right_profiles || [];
+    if (diffs.length > 0 || lp.length > 0 || rp.length > 0) {
       _diffLeft = left8; _diffRight = right8;
       const panel = document.getElementById('diff-panel');
-      const body = document.getElementById('diff-panel-body');
-      const title = document.getElementById('diff-panel-title');
-      title.textContent = `${left8.slice(0,8)} → ${right8.slice(0,8)}`;
-      body.innerHTML = '';
-      for (const d of data.diffs) {
-        const name = d.diff_path.split('/').pop();
-        const ext = name.split('.').pop().toLowerCase();
-        const wrap = document.createElement('div');
-        wrap.className = 'diff-frame-wrap';
-        const badge = document.createElement('a');
-        badge.href = d.diff_path; badge.className = 'ab ab-diff';
-        badge.target = '_blank'; badge.rel = 'noopener';
-        badge.textContent = '⊕ ' + name;
-        wrap.appendChild(badge);
-        if (ext === 'html' || ext === 'svg') {
-          const iframe = document.createElement('iframe');
-          iframe.src = d.diff_path;
-          wrap.appendChild(iframe);
-        }
-        body.appendChild(wrap);
-      }
+      document.getElementById('diff-panel-title').textContent = `${left8.slice(0,8)} → ${right8.slice(0,8)}`;
+      _renderDiffPanel(left8, right8, diffs, lp, rp);
+      panel.classList.add('visible');
       panel.classList.add('visible');
     }
   } catch {}
