@@ -611,6 +611,35 @@ def _run_server(cfg, epoch: int, epoch_dir: Path, report_html: Path, port: int) 
                 self._send(200, "text/html; charset=utf-8", _report_injected.encode())
                 return
 
+            if path == "api/diffs":
+                qs = urllib.parse.parse_qs(parsed.query)
+                left_prefix = (qs.get("left", [""])[0])
+                right_prefix = (qs.get("right", [""])[0])
+                store = _Store(cfg.db_path(), epoch_override=epoch)
+                try:
+                    all_commits = git.list_commits(
+                        repo_path, cfg.repo.branch,
+                        exclude_before=git.find_merge_base(repo_path, cfg.repo.branch),
+                    )
+                    left_commit = next((c for c in all_commits if c.sha.startswith(left_prefix)), None)
+                    right_commit = next((c for c in all_commits if c.sha.startswith(right_prefix)), None)
+                    if not left_commit or not right_commit:
+                        self._send(404, "application/json", json.dumps({"error": "commit not found"}).encode())
+                        return
+                    raw_diffs = store.diffs_for_pair(left_commit.sha, right_commit.sha)
+                    epoch_dir_resolved = epoch_dir.resolve()
+                    rebased = []
+                    for d in raw_diffs:
+                        try:
+                            rel = Path(d["diff_path"]).resolve().relative_to(epoch_dir_resolved)
+                            rebased.append({**d, "diff_path": str(rel)})
+                        except ValueError:
+                            rebased.append(d)
+                    self._send(200, "application/json", json.dumps({"diffs": rebased}).encode())
+                finally:
+                    store.close()
+                return
+
             # Static assets relative to epoch_dir
             candidate = (epoch_dir / path).resolve()
             try:
@@ -666,9 +695,10 @@ def _run_server(cfg, epoch: int, epoch_dir: Path, report_html: Path, port: int) 
                     epoch=epoch,
                     branch=cfg.repo.branch,
                     log=messages.append,
+                    force=True,
                 )
 
-                raw_diffs = store.diffs_for_right_sha(right_sha)
+                raw_diffs = store.diffs_for_pair(left_commit.sha, right_commit.sha)
                 # Rebase diff_path to be epoch-dir-relative so the browser
                 # can request them from this server (which serves under epoch_dir).
                 epoch_dir_resolved = epoch_dir.resolve()

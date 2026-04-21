@@ -90,10 +90,18 @@
   }
   #diff-panel.visible { display: flex; }
   #diff-panel-resize {
-    height: 6px; flex-shrink: 0; cursor: ns-resize;
-    background: transparent; border-top: 2px solid #30363d;
+    height: 10px; flex-shrink: 0; cursor: ns-resize;
+    background: #0d1117;
+    border-top: 1px solid #30363d;
+    display: flex; align-items: center; justify-content: center;
   }
-  #diff-panel-resize:hover, #diff-panel-resize.dragging { border-top-color: #388bfd; }
+  #diff-panel-resize::after {
+    content: ''; display: block;
+    width: 36px; height: 3px; border-radius: 2px;
+    background: #30363d;
+  }
+  #diff-panel-resize:hover::after,
+  #diff-panel-resize.dragging::after { background: #388bfd; }
   #diff-panel-hdr {
     display: flex; align-items: center; gap: 0.75rem;
     padding: 0.4rem 1rem; background: #0d1117; border-bottom: 1px solid #21262d;
@@ -377,8 +385,17 @@ function _parseUrlState() {
   const bmRaw = sp.get('bm') ?? '';
   const knownGroups = new Set(benchGroups.map(bg => bg.group));
   const bms = new Set(bmRaw.split(',').filter(b => b && knownGroups.has(b)));
-  const shas = new Set(location.hash.slice(1).split(',').filter(Boolean));
-  return { mode, runs, sec, bms, shas };
+  // expanded rows: ?expand= (preferred) or legacy #hash
+  const expandRaw = sp.get('expand') ?? location.hash.slice(1);
+  const shas = new Set(expandRaw.split(',').filter(Boolean));
+  // server-mode state
+  const cmpRaw = sp.get('cmp') ?? '';
+  const cmp = new Set(cmpRaw.split(',').filter(Boolean));
+  const diffRaw = sp.get('diff') ?? '';
+  const diffParts = diffRaw.includes(',') ? diffRaw.split(',') : [];
+  const diffLeft = diffParts[0] ?? '';
+  const diffRight = diffParts[1] ?? '';
+  return { mode, runs, sec, bms, shas, cmp, diffLeft, diffRight };
 }
 
 const { mode: _initMode, runs: _initRuns, sec: _initSec, bms: _initBms } = _parseUrlState();
@@ -740,16 +757,34 @@ for (const [name, bd] of Object.entries(benchData)) {
   if (sel.value !== runsMode) runsMode = 'latest';
 })();
 
-function pushUrlState(shas) {
-  if (shas === undefined) shas = new Set(location.hash.slice(1).split(',').filter(Boolean));
+// Tracks which diff pair is currently open in the panel
+let _diffLeft = '', _diffRight = '';
+
+function _buildUrl(shas, useReplace) {
+  if (shas === undefined) {
+    const sp0 = new URLSearchParams(location.search);
+    const raw = sp0.get('expand') ?? location.hash.slice(1);
+    shas = new Set(raw.split(',').filter(Boolean));
+  }
   const sp = new URLSearchParams();
   if (chartMode !== 'mean') sp.set('mode', chartMode);
   if (runsMode !== 'latest') sp.set('runs', runsMode);
   if (secondaryMetric) sp.set('sec', secondaryMetric);
   if (selectedBenchmarks.size > 0) sp.set('bm', [...selectedBenchmarks].join(','));
-  const search = sp.toString() ? '?' + sp.toString() : '';
-  const hash = shas.size ? '#' + [...shas].join(',') : '';
-  history.pushState(null, '', search + hash || location.pathname);
+  if (shas.size) sp.set('expand', [...shas].join(','));
+  if (serverMode && selectedForCompare.size > 0)
+    sp.set('cmp', [...selectedForCompare].map(s => s.slice(0,8)).join(','));
+  if (serverMode && _diffLeft && _diffRight)
+    sp.set('diff', `${_diffLeft.slice(0,8)},${_diffRight.slice(0,8)}`);
+  return (sp.toString() ? '?' + sp.toString() : '') || location.pathname;
+}
+
+function pushUrlState(shas) {
+  history.pushState(null, '', _buildUrl(shas));
+}
+
+function replaceUrlState() {
+  history.replaceState(null, '', _buildUrl());
 }
 
 function setChartMode(mode) {
@@ -948,10 +983,13 @@ function clearCompare() {
   selectedForCompare.clear();
   document.querySelectorAll('.compare-cb').forEach(cb => { cb.checked = false; });
   _updateCompareBar();
+  replaceUrlState();
 }
 
 function closeDiffPanel() {
   document.getElementById('diff-panel').classList.remove('visible');
+  _diffLeft = ''; _diffRight = '';
+  replaceUrlState();
 }
 
 async function runCompare() {
@@ -976,6 +1014,8 @@ async function runCompare() {
 }
 
 function _showDiffResults(left, right, diffs) {
+  _diffLeft = left; _diffRight = right;
+  replaceUrlState();
   const panel = document.getElementById('diff-panel');
   const body = document.getElementById('diff-panel-body');
   const title = document.getElementById('diff-panel-title');
@@ -1061,8 +1101,9 @@ for (const c of commits) {
 
   // Compare checkbox (server mode only)
   const cbHtml = serverMode
-    ? `<input type="checkbox" class="compare-cb" style="margin-right:0.3rem" title="Select for comparison"
-         onchange="(function(sha,cb){if(cb.checked){selectedForCompare.add(sha)}else{selectedForCompare.delete(sha)};_updateCompareBar()})('${esc(c.sha)}',this)">`
+    ? `<input type="checkbox" class="compare-cb" data-sha="${esc(c.sha)}" style="margin-right:0.3rem" title="Select for comparison"
+         onclick="event.stopPropagation()"
+         onchange="(function(sha,cb){if(cb.checked){selectedForCompare.add(sha)}else{selectedForCompare.delete(sha)};_updateCompareBar();replaceUrlState()})('${esc(c.sha)}',this)">`
     : '';
 
   const shaLink = githubUrl
@@ -1195,7 +1236,8 @@ for (const c of commits) {
     if (window.getSelection()?.toString()) return;
     const expanding = runRows[0]?.classList.contains('hidden');
     setExpanded(expanding);
-    const shas = new Set(location.hash.slice(1).split(',').filter(Boolean));
+    const sp0 = new URLSearchParams(location.search);
+    const shas = new Set((sp0.get('expand') ?? '').split(',').filter(Boolean));
     expanding ? shas.add(c.short_sha) : shas.delete(c.short_sha);
     pushUrlState(shas);
     if (expanding) commitTr.scrollIntoView({ block: 'nearest' });
@@ -1264,8 +1306,44 @@ for (const c of commits) {
 })();
 
 // ── URL state restore ─────────────────────────────────────────────────────────
+async function _fetchAndShowDiffs(left8, right8) {
+  try {
+    const url = `/api/diffs?left=${encodeURIComponent(left8)}&right=${encodeURIComponent(right8)}`;
+    const resp = await fetch(url);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (data.diffs && data.diffs.length > 0) {
+      // Set vars directly to avoid double replaceState during restore
+      _diffLeft = left8; _diffRight = right8;
+      const panel = document.getElementById('diff-panel');
+      const body = document.getElementById('diff-panel-body');
+      const title = document.getElementById('diff-panel-title');
+      title.textContent = `${left8.slice(0,8)} → ${right8.slice(0,8)}`;
+      body.innerHTML = '';
+      for (const d of data.diffs) {
+        const name = d.diff_path.split('/').pop();
+        const ext = name.split('.').pop().toLowerCase();
+        const wrap = document.createElement('div');
+        wrap.className = 'diff-frame-wrap';
+        const badge = document.createElement('a');
+        badge.href = d.diff_path; badge.className = 'ab ab-diff';
+        badge.target = '_blank'; badge.rel = 'noopener';
+        badge.textContent = '⊕ ' + name;
+        wrap.appendChild(badge);
+        if (ext === 'html' || ext === 'svg') {
+          const iframe = document.createElement('iframe');
+          iframe.src = d.diff_path;
+          wrap.appendChild(iframe);
+        }
+        body.appendChild(wrap);
+      }
+      panel.classList.add('visible');
+    }
+  } catch {}
+}
+
 function applyUrlState() {
-  const { mode, runs, sec, bms, shas } = _parseUrlState();
+  const { mode, runs, sec, bms, shas, cmp, diffLeft, diffRight } = _parseUrlState();
   chartMode = mode;
   document.querySelectorAll('.mode-btn').forEach(b =>
     b.classList.toggle('active', b.dataset.mode === mode));
@@ -1283,6 +1361,21 @@ function applyUrlState() {
   if (shas.size) {
     const first = document.getElementById('commit-' + [...shas][0]);
     if (first) first.scrollIntoView({ block: 'center' });
+  }
+  // Restore compare checkboxes (server mode)
+  if (serverMode && cmp.size > 0) {
+    selectedForCompare.clear();
+    document.querySelectorAll('.compare-cb').forEach(cb => {
+      const sha8 = (cb.dataset.sha ?? '').slice(0, 8);
+      if (cmp.has(sha8)) { cb.checked = true; selectedForCompare.add(cb.dataset.sha); }
+      else { cb.checked = false; }
+    });
+    _updateCompareBar();
+  }
+  // Restore diff panel (server mode) — fetch existing diffs without re-running tool
+  if (serverMode && diffLeft && diffRight) {
+    _diffLeft = diffLeft; _diffRight = diffRight;
+    _fetchAndShowDiffs(diffLeft, diffRight);
   }
 }
 applyUrlState();

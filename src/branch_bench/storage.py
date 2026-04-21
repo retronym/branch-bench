@@ -497,6 +497,27 @@ class Store:
             for r in rows
         ]
 
+    def delete_diffs_for_pair(self, epoch: int, left_sha: str, right_sha: str, diff_vs: str, source_ext: str) -> None:
+        """Remove all stored diff rows for this exact combination (used before a forced re-run)."""
+        self._conn.execute(
+            "DELETE FROM diffs WHERE epoch=? AND left_sha=? AND right_sha=? AND diff_vs=? AND source_ext=?",
+            (epoch, left_sha, right_sha, diff_vs, source_ext),
+        )
+        self._conn.commit()
+
+    def diffs_for_pair(self, left_sha: str, right_sha: str) -> list[dict]:
+        """Return diff records for an exact (left, right) pair in the current epoch."""
+        epoch = self.current_epoch()
+        rows = self._conn.execute(
+            "SELECT left_sha, right_sha, diff_vs, source_ext, diff_path, created_at "
+            "FROM diffs WHERE epoch=? AND left_sha=? AND right_sha=? ORDER BY diff_vs, source_ext, diff_path",
+            (epoch, left_sha, right_sha),
+        ).fetchall()
+        return [
+            dict(zip(["left_sha", "right_sha", "diff_vs", "source_ext", "diff_path", "created_at"], r))
+            for r in rows
+        ]
+
     def diff_exists(self, epoch: int, left_sha: str, right_sha: str, diff_vs: str, source_ext: str) -> bool:
         """Return True if at least one diff file exists for this combination."""
         row = self._conn.execute(

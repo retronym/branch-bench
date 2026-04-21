@@ -260,6 +260,7 @@ def diff_pair(
     epoch: int,
     branch: str,
     log: Callable[[str], None],
+    force: bool = False,
 ) -> None:
     """Run configured diff tools between two commits' best available profiles.
 
@@ -295,10 +296,12 @@ def diff_pair(
         for right_p in right_by_ext[ext]:
             right_file = Path(right_p["file_path"])
 
-            # Skip if already computed (idempotent re-runs)
-            if store.diff_exists(epoch, left_sha, right_commit.sha, diff_vs, ext):
+            # Skip if already computed (idempotent re-runs), unless forced
+            if not force and store.diff_exists(epoch, left_sha, right_commit.sha, diff_vs, ext):
                 log(f"  [diff] {left_short_sha[:8]}…{right_commit.short_sha} ({ext}) — cached")
                 continue
+            if force:
+                store.delete_diffs_for_pair(epoch, left_sha, right_commit.sha, diff_vs, ext)
 
             artifact_stem = left_file.stem
             out_dir = cfg.diff_assets_dir(
