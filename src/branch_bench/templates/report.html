@@ -125,7 +125,19 @@
   .diff-widget {
     display: flex; flex-direction: column; flex: 1 1 560px; min-width: 280px;
     min-height: 0; gap: 0.3rem;
+    transition: opacity 0.2s ease, filter 0.2s ease, transform 0.18s ease;
   }
+  .diff-widget.dw-hiding  { opacity: 0; transform: scale(0.93); pointer-events: none; }
+  .diff-widget.dw-showing { opacity: 0; transform: scale(0.93); }
+  @keyframes dw-chip-in { from { opacity: 0; transform: scale(0.88); } to { opacity: 1; transform: scale(1); } }
+  .diff-hidden-chip { animation: dw-chip-in 0.15s ease; }
+  /* Hide-button hover: softly dim/blur this widget */
+  .diff-widget:has(.dw-hide-btn:hover) {
+    opacity: 0.45; filter: blur(0.6px);
+  }
+  /* Focus-button hover: dim/blur all other widgets */
+  #diff-widget-grid:has(.dw-focus-btn:hover) .diff-widget { opacity: 0.25; filter: blur(1.5px); }
+  #diff-widget-grid:has(.dw-focus-btn:hover) .diff-widget:has(.dw-focus-btn:hover) { opacity: 1; filter: none; }
   .dw-stem { font-size: 0.72rem; font-family: monospace; color: #8b949e; padding: 0.18rem 0.4rem; margin-right: 0.15rem; border-right: 1px solid #30363d; }
   .dw-tabs { display: flex; gap: 0.25rem; align-items: center; flex-wrap: wrap; }
   .dw-kbd { font-size: 0.72rem;  color: #c9d1d9; font-family: monospace; margin-left: auto;
@@ -151,12 +163,13 @@
     border: 1px solid #30363d; border-radius: 4px; background: #fff;
   }
   /* ── Diff widget hide/show ── */
-  .dw-hide-btn {
+  .dw-hide-btn, .dw-focus-btn {
     background: none; border: 1px solid transparent; color: #484f58;
     border-radius: 3px; padding: 0.1rem 0.3rem; cursor: pointer;
     font-size: 0.78rem; line-height: 1; flex-shrink: 0;
   }
-  .dw-hide-btn:hover { color: #8b949e; border-color: #30363d; }
+  .dw-hide-btn:hover  { color: #8b949e; border-color: #30363d; }
+  .dw-focus-btn:hover { color: #58a6ff; border-color: #388bfd55; }
   #diff-hidden-row {
     width: 100%; display: none; flex-wrap: wrap; gap: 0.4rem;
     padding: 0.3rem 0.25rem 0.45rem; border-bottom: 1px solid #21262d;
@@ -181,10 +194,10 @@
   .diff-layout-btn svg { display: block; }
   .diff-layout-btn.active { border-color: #388bfd88; color: #58a6ff; background: #21262d; }
   .diff-layout-btn:hover:not(.active) { color: #8b949e; border-color: #8b949e; }
-  /* Column layout overrides */
-  #diff-widget-grid.cols-1 .diff-widget { flex: 0 0 100%; min-width: 0; }
-  #diff-widget-grid.cols-2 .diff-widget { flex: 0 0 calc(50% - 0.375rem); min-width: 0; }
-  #diff-widget-grid.cols-4 .diff-widget { flex: 0 0 calc(25% - 0.5625rem); min-width: 0; }
+  /* Column layout overrides — flex-grow:1 lets lone/few widgets expand to fill the row */
+  #diff-widget-grid.cols-1 .diff-widget { flex: 1 0 100%; min-width: 0; }
+  #diff-widget-grid.cols-2 .diff-widget { flex: 1 0 calc(50% - 0.375rem); min-width: 0; }
+  #diff-widget-grid.cols-4 .diff-widget { flex: 1 0 calc(25% - 0.5625rem); min-width: 0; }
   /* ── Compare button (server mode) ── */
   #compare-bar {
     position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%);
@@ -851,6 +864,20 @@ let _diffColLayout = (() => { try { return parseInt(localStorage.getItem('bb-dif
 document.querySelectorAll('.diff-layout-btn').forEach(b =>
   b.classList.toggle('active', parseInt(b.dataset.cols) === _diffColLayout));
 let _diffWidgets = []; // [{el, stem, hidden, chip}] in render order
+const _dwResizeObserver = new ResizeObserver(entries => {
+  for (const entry of entries) {
+    const w = Math.round(entry.contentRect.width);
+    if (!w) continue;
+    entry.target.querySelectorAll('iframe[data-view]').forEach(f => {
+      const prev = f._dwW ?? 0;
+      f._dwW = w;
+      // Only reload the active (visible) tab, and only on significant width change
+      if (!prev || Math.abs(w - prev) < 40) return;
+      if (f.style.opacity !== '1') return;
+      f.src = f.src; // reload in place; old content shows until new frame is ready
+    });
+  }
+});
 
 function _buildUrl(shas, useReplace) {
   if (shas === undefined) {
@@ -1118,16 +1145,24 @@ function _hideWidget(idx) {
   const entry = _diffWidgets[idx];
   if (!entry || entry.hidden) return;
   entry.hidden = true;
-  entry.el.remove();
-  const row = document.getElementById('diff-hidden-row');
-  const chip = document.createElement('div');
-  chip.className = 'diff-hidden-chip';
-  chip.title = 'Click to show';
-  chip.innerHTML = `<span>${entry.stem}</span><span class="diff-hidden-chip-show">⊞</span>`;
-  chip.onclick = () => _showWidget(idx);
-  entry.chip = chip;
-  row.appendChild(chip);
-  row.classList.add('has-items');
+  entry.el.classList.add('dw-hiding');
+  entry.el.addEventListener('transitionend', () => {
+    entry.el.remove();
+    entry.el.classList.remove('dw-hiding');
+    const row = document.getElementById('diff-hidden-row');
+    const chip = document.createElement('div');
+    chip.className = 'diff-hidden-chip';
+    chip.title = 'Click to show';
+    chip.innerHTML = `<span>${entry.stem}</span><span class="diff-hidden-chip-show">⊞</span>`;
+    chip.onclick = () => _showWidget(idx);
+    entry.chip = chip;
+    row.appendChild(chip);
+    row.classList.add('has-items');
+  }, { once: true });
+}
+
+function _focusWidget(idx) {
+  _diffWidgets.forEach((_, i) => { if (i !== idx) _hideWidget(i); });
 }
 
 function _showWidget(idx) {
@@ -1138,8 +1173,11 @@ function _showWidget(idx) {
   entry.chip = null;
   const grid = document.getElementById('diff-widget-grid');
   const after = _diffWidgets.slice(idx + 1).find(w => !w.hidden);
+  entry.el.classList.add('dw-showing');
   if (after) grid.insertBefore(entry.el, after.el);
   else grid.appendChild(entry.el);
+  requestAnimationFrame(() => requestAnimationFrame(() =>
+    entry.el.classList.remove('dw-showing')));
   document.getElementById('diff-hidden-row')
     .classList.toggle('has-items', _diffWidgets.some(w => w.hidden));
 }
@@ -1295,6 +1333,14 @@ function _makeDiffWidget(g, left8, right8, idx) {
   hideBtn.onclick = e => { e.stopPropagation(); _hideWidget(idx); };
   tabBar.appendChild(hideBtn);
 
+  // Focus button
+  const focusBtn = document.createElement('button');
+  focusBtn.className = 'dw-focus-btn';
+  focusBtn.title = 'Focus — hide others';
+  focusBtn.textContent = '◎';
+  focusBtn.onclick = e => { e.stopPropagation(); _focusWidget(idx); };
+  tabBar.appendChild(focusBtn);
+
   if (g.stem) {
     const lbl = document.createElement('span');
     lbl.className = 'dw-stem';
@@ -1329,6 +1375,7 @@ function _makeDiffWidget(g, left8, right8, idx) {
   // Body with iframes
   const body = document.createElement('div');
   body.className = 'dw-body';
+  _dwResizeObserver.observe(body);
 
   for (const s of slots) {
     if (!_VIEWABLE.has(_artExt(s.src))) continue;
@@ -1344,8 +1391,9 @@ function _makeDiffWidget(g, left8, right8, idx) {
     fallback.innerHTML = `<span style="color:#8b949e;font-size:0.82rem">Content could not be displayed inline.</span>`
       + `<a href="${s.src}" target="_blank" rel="noopener" style="color:#58a6ff;font-size:0.82rem">Open in new tab ↗</a>`;
     iframe.addEventListener('load', () => {
-      try { if (!iframe.contentDocument) throw 0; }
-      catch {
+      try {
+        if (!iframe.contentDocument) throw 0;
+      } catch {
         iframe.dataset.blocked = '1';
         if (iframe.style.opacity === '1') {
           iframe.style.opacity = '0'; iframe.style.pointerEvents = 'none';
