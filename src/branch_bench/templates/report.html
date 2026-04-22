@@ -848,6 +848,8 @@ for (const [name, bd] of Object.entries(benchData)) {
 // Tracks which diff pair is currently open in the panel
 let _diffLeft = '', _diffRight = '';
 let _diffColLayout = (() => { try { return parseInt(localStorage.getItem('bb-diff-cols') || '0') || 0; } catch { return 0; } })();
+document.querySelectorAll('.diff-layout-btn').forEach(b =>
+  b.classList.toggle('active', parseInt(b.dataset.cols) === _diffColLayout));
 let _diffWidgets = []; // [{el, stem, hidden, chip}] in render order
 
 function _buildUrl(shas, useReplace) {
