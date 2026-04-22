@@ -571,7 +571,7 @@ function _applyBenchmarkFilter() {
   for (const e of epochLinks) {
     const li = document.createElement('li');
     if (e.epoch === currentEpoch) li.className = 'current';
-    const href = serverMode ? `/?epoch=${e.epoch}` : `${e.path}/index.html';
+    const href = serverMode ? `/?epoch=${e.epoch}` : `${e.path}/index.html`;
     li.innerHTML = `<a href="${esc(href)}">Epoch ${e.epoch}${e.epoch === currentEpoch ? ' ✓' : ''}</a>`;
     list.appendChild(li);
   }
