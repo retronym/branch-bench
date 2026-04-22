@@ -250,7 +250,7 @@ def generate(store: Store, output_path: Path, github_url: str | None = None, nex
         ]),
         current_epoch=current_epoch,
         epoch_links_json=json.dumps([
-            {"epoch": ep, "path": f"../epoch-{ep}/"}
+            {"epoch": ep, "path": f"../epoch-{ep}/index.html"}
             for ep in all_epochs
         ]),
     )
