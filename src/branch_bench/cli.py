@@ -672,7 +672,7 @@ function _activateTab(btn){{
 document.getElementById('hdr').addEventListener('click',function(e){{
   const btn=e.target.closest('.tab');if(btn)_activateTab(btn);
 }});
-document.addEventListener('keydown',function(e){{
+function _onKey(e) {{
   if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA')return;
   const tabs=_tabs();
   const cur=tabs.findIndex(t=>t.classList.contains('active'));
@@ -682,6 +682,12 @@ document.addEventListener('keydown',function(e){{
   else if(e.key==='[')t=tabs[(cur-1+tabs.length)%tabs.length];
   else if(e.key===']')t=tabs[(cur+1)%tabs.length];
   if(t){{_activateTab(t);e.preventDefault();}}
+}}
+document.addEventListener('keydown', _onKey);
+document.querySelectorAll('iframe').forEach(function(f) {{
+  f.addEventListener('load', function() {{
+    try {{ f.contentWindow.addEventListener('keydown', _onKey); }} catch(e) {{}}
+  }});
 }});
 </script>
 </body></html>"""

@@ -1278,7 +1278,7 @@ function _standaloneViewHtml(slots, title) {
 const _tabs=()=>Array.from(document.querySelectorAll('.tab'));
 function _act(btn){const v=btn.dataset.view;_tabs().forEach(b=>b.classList.toggle('active',b.dataset.view===v));document.querySelectorAll('#body iframe').forEach(f=>f.classList.toggle('hidden',f.dataset.view!==v));}
 document.getElementById('hdr').addEventListener('click',e=>{const b=e.target.closest('.tab');if(b)_act(b);});
-document.addEventListener('keydown',e=>{
+function _onKey(e) {
   if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA')return;
   const tabs=_tabs(),cur=tabs.findIndex(t=>t.classList.contains('active'));
   const n=parseInt(e.key);
@@ -1287,6 +1287,12 @@ document.addEventListener('keydown',e=>{
   else if(e.key==='[')t=tabs[(cur-1+tabs.length)%tabs.length];
   else if(e.key===']')t=tabs[(cur+1)%tabs.length];
   if(t){_act(t);e.preventDefault();}
+}
+document.addEventListener('keydown', _onKey);
+document.querySelectorAll('iframe').forEach(f => {
+  f.addEventListener('load', () => {
+    try { f.contentWindow.addEventListener('keydown', _onKey); } catch(e) {}
+  });
 });
 <\/script>
 </body></html>`;
@@ -1407,6 +1413,9 @@ function _makeDiffWidget(g, left8, right8, idx) {
       // Record the width at which this iframe's content initialised
       iframe._dwLoadedW = iframe._dwW || Math.round(body.offsetWidth);
       try {
+        if (_onGlobalKey) iframe.contentWindow.addEventListener('keydown', _onGlobalKey);
+      } catch (e) {}
+      try {
         if (!iframe.contentDocument) throw 0;
       } catch {
         iframe.dataset.blocked = '1';
@@ -1446,6 +1455,7 @@ function _makeDiffWidget(g, left8, right8, idx) {
 
 // Keyboard nav for diff panel: 1-4 = select tab N, [ ] = prev/next tab
 let _diffKbdWidget = null; // last-hovered widget
+let _onGlobalKey = null;
 (function() {
   function _activeWidget() {
     const panel = document.getElementById('diff-panel-body');
@@ -1463,7 +1473,7 @@ let _diffKbdWidget = null; // last-hovered widget
     const next = (cur + delta + tabs.length) % tabs.length;
     tabs[next].click();
   }
-  document.addEventListener('keydown', e => {
+  _onGlobalKey = e => {
     if (!document.getElementById('diff-panel')?.classList.contains('visible')) return;
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) return;
     const w = _activeWidget();
@@ -1472,7 +1482,8 @@ let _diffKbdWidget = null; // last-hovered widget
     if (n >= 1 && n <= 4)       { _clickTab(w, n - 1); e.preventDefault(); }
     else if (e.key === '[')     { _shiftTab(w, -1);    e.preventDefault(); }
     else if (e.key === ']')     { _shiftTab(w,  1);    e.preventDefault(); }
-  });
+  };
+  document.addEventListener('keydown', _onGlobalKey);
 })();
 
 function _renderDiffPanel(left, right, diffs, leftProfiles, rightProfiles) {
