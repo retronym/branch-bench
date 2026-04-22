@@ -571,7 +571,7 @@ function _applyBenchmarkFilter() {
   for (const e of epochLinks) {
     const li = document.createElement('li');
     if (e.epoch === currentEpoch) li.className = 'current';
-    const href = serverMode ? `/?epoch=${e.epoch}` : e.path;
+    const href = serverMode ? `/?epoch=${e.epoch}` : `${e.path}/index.html';
     li.innerHTML = `<a href="${esc(href)}">Epoch ${e.epoch}${e.epoch === currentEpoch ? ' ✓' : ''}</a>`;
     list.appendChild(li);
   }
@@ -874,6 +874,7 @@ const _dwResizeObserver = new ResizeObserver(entries => {
       // Only reload the active (visible) tab, and only on significant width change
       if (!prev || Math.abs(w - prev) < 40) return;
       if (f.style.opacity !== '1') return;
+      f._dwLoadedW = w;
       f.src = f.src; // reload in place; old content shows until new frame is ready
     });
   }
@@ -1391,6 +1392,8 @@ function _makeDiffWidget(g, left8, right8, idx) {
     fallback.innerHTML = `<span style="color:#8b949e;font-size:0.82rem">Content could not be displayed inline.</span>`
       + `<a href="${s.src}" target="_blank" rel="noopener" style="color:#58a6ff;font-size:0.82rem">Open in new tab ↗</a>`;
     iframe.addEventListener('load', () => {
+      // Record the width at which this iframe's content initialised
+      iframe._dwLoadedW = iframe._dwW || Math.round(body.offsetWidth);
       try {
         if (!iframe.contentDocument) throw 0;
       } catch {
@@ -1416,6 +1419,11 @@ function _makeDiffWidget(g, left8, right8, idx) {
       f.style.pointerEvents = (active && !blocked) ? '' : 'none';
       const fb = body.querySelector(`[data-fallback="${f.dataset.view}"]`);
       if (fb) fb.style.display = (active && blocked) ? 'flex' : 'none';
+      // Reload if this tab missed a significant resize while hidden
+      if (active && !blocked && f._dwW && Math.abs(f._dwW - (f._dwLoadedW ?? 0)) >= 40) {
+        f._dwLoadedW = f._dwW;
+        f.src = f.src;
+      }
     });
   });
 

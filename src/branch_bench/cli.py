@@ -381,17 +381,28 @@ def _do_report(cfg, epoch_override: int | None = None, open_browser: bool = Fals
     repo_path = Path(cfg.repo.path).resolve()
     store = Store(cfg.db_path(), epoch_override=epoch_override)
     try:
-        merge_base = git.find_merge_base(repo_path, cfg.repo.branch)
-        commits = git.list_commits(repo_path, cfg.repo.branch, exclude_before=merge_base)
-        store.refresh_positions([c.sha for c in commits])
-        retired = store.retire_stale_commits({c.sha for c in commits})
-        if retired:
-            click.echo(f"  Retired {retired} stale commit(s) no longer on branch")
+        epoch = store.current_epoch()
+        if epoch_override is None:
+            # Sync with current git workspace only if regenerating current epoch
+            try:
+                merge_base = git.find_merge_base(repo_path, cfg.repo.branch)
+                commits = git.list_commits(repo_path, cfg.repo.branch, exclude_before=merge_base)
+                for c in commits:
+                    store.save_commit(
+                        sha=c.sha, short_sha=c.short_sha, message=c.message,
+                        author=c.author, timestamp=c.timestamp, branch=cfg.repo.branch,
+                        parent_sha=c.parent_sha, tree_sha=c.tree_sha
+                    )
+                if commits:
+                    store.set_epoch_head(epoch, commits[-1].sha)
+                    store.set_epoch_base(epoch, commits[0].parent_sha or "")
+            except Exception as e:
+                click.echo(f"  [!] Git sync failed (skipping): {e}")
+
         backfilled = store.backfill_by_tree_sha()
         if backfilled:
             click.echo(f"  Backfilled {backfilled} commit(s) via tree-SHA reuse")
         github_url = git.github_remote_url(repo_path, cfg.repo.branch)
-        epoch = store.current_epoch()
         out = cfg.report_path(epoch)
         generate(store, out, github_url=github_url)
         generate_index(cfg)
@@ -527,6 +538,13 @@ def migrate(config: str, from_db: str | None) -> None:
                     skipped += 1
 
         click.echo(f"  Copied {copied} file(s), skipped {skipped} already-migrated.")
+
+        # Backfill parent_sha and epoch_head for topological reconstruction
+        repo_path = Path(cfg.repo.path).resolve()
+        parents = store.backfill_parents(repo_path)
+        heads = store.backfill_epoch_heads()
+        if parents or heads:
+            click.echo(f"  Backfilled {parents} parent SHA(s) and {heads} epoch head(s) from git/metadata.")
 
         # Regenerate reports for all epochs
         github_url = git.github_remote_url(Path(cfg.repo.path).resolve(), cfg.repo.branch)

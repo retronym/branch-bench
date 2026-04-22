@@ -534,13 +534,14 @@ def run_branch(
             branch=cfg.repo.branch,
             position=i,
             tree_sha=commit.tree_sha,
+            parent_sha=commit.parent_sha,
         )
 
-    if not from_sha and not to_sha and max_commits is None:
-        current_shas = {c.sha for c in all_commits}
-        retired = store.retire_stale_commits(current_shas)
-        if retired:
-            log(f"  Retired {retired} stale commit(s) no longer on branch")
+    if all_commits:
+        store.set_epoch_head(epoch, all_commits[-1].sha)
+        # We also store the base commit's parent as the epoch base to know where to stop
+        # when traversing backwards (though stopping when parent_sha is not in DB also works).
+        store.set_epoch_base(epoch, all_commits[0].parent_sha or "")
 
     backfilled = store.backfill_by_tree_sha()
     if backfilled:
@@ -814,9 +815,13 @@ def profile_branch(
             branch=cfg.repo.branch,
             position=i,
             tree_sha=commit.tree_sha,
+            parent_sha=commit.parent_sha,
         )
 
-    run_commits = run_range
+    epoch = store.current_epoch()
+    if all_commits:
+        store.set_epoch_head(epoch, all_commits[-1].sha)
+        store.set_epoch_base(epoch, all_commits[0].parent_sha or "")
     if resolved_targets:
         seen_shas: set[str] = set()
         run_commits = []

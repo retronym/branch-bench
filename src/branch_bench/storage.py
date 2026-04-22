@@ -137,6 +137,7 @@ class Store:
             ("commits",          "epoch",           "INTEGER NOT NULL DEFAULT 1"),
             ("commits",          "position",        "INTEGER NOT NULL DEFAULT 0"),
             ("commits",          "tree_sha",        "TEXT"),
+            ("commits",          "parent_sha",      "TEXT"),
             ("benchmark_results","raw_data",        "TEXT"),
             # 'bench' | 'profile' — distinguishes bench_cmd runs from profile_cmd runs
             ("runs",             "source",          "TEXT NOT NULL DEFAULT 'bench'"),
@@ -221,9 +222,32 @@ class Store:
                  SELECT DISTINCT epoch FROM commits
                  UNION
                  SELECT DISTINCT epoch FROM runs
-               ) ORDER BY epoch"""
+               )"""
         ).fetchall()
-        return [r[0] for r in rows if r[0] > 0]
+        eps = {r[0] for r in rows if r[0] > 0}
+
+        setting_rows = self._conn.execute("SELECT key FROM settings WHERE key LIKE 'epoch_%_head'").fetchall()
+        for r in setting_rows:
+            try:
+                eps.add(int(r[0].split("_")[1]))
+            except (ValueError, IndexError):
+                pass
+
+        return sorted(list(eps))
+
+    def set_epoch_head(self, epoch: int, head_sha: str) -> None:
+        self._conn.execute(
+            "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (f"epoch_{epoch}_head", head_sha),
+        )
+        self._conn.commit()
+
+    def set_epoch_base(self, epoch: int, base_sha: str) -> None:
+        self._conn.execute(
+            "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (f"epoch_{epoch}_base", base_sha),
+        )
+        self._conn.commit()
 
     def new_epoch(self) -> int:
         epoch = self.current_epoch() + 1
@@ -278,49 +302,25 @@ class Store:
         ).fetchone()
         return row is not None
 
-    def retire_stale_commits(self, current_shas: set[str]) -> int:
-        """Remove from the current epoch any commits whose SHA is not in current_shas.
-        Returns the number of commits retired."""
-        epoch = self.current_epoch()
-        epoch_shas = {
-            row[0] for row in self._conn.execute(
-                "SELECT sha FROM commits WHERE epoch=?", (epoch,)
-            ).fetchall()
-        }
-        stale = epoch_shas - current_shas
-        if not stale:
-            return 0
-        for sha in stale:
-            self._conn.execute("UPDATE commits SET epoch=0 WHERE sha=?", (sha,))
-        self._conn.commit()
-        return len(stale)
-
-    def refresh_positions(self, ordered_shas: list[str]) -> None:
-        """Update position for existing current-epoch commits based on their index in ordered_shas."""
-        epoch = self.current_epoch()
-        for i, sha in enumerate(ordered_shas):
-            self._conn.execute(
-                "UPDATE commits SET position=? WHERE sha=? AND epoch=?",
-                (i, sha, epoch),
-            )
-        self._conn.commit()
-
     def backfill_by_tree_sha(self) -> int:
         """Clone runs for epoch commits that have no runs but share a tree_sha with one that does.
         Returns the number of commits backfilled."""
         epoch = self.current_epoch()
-        no_run = self._conn.execute(
-            "SELECT sha, tree_sha, short_sha FROM commits "
-            "WHERE epoch=? AND tree_sha IS NOT NULL "
-            "AND sha NOT IN (SELECT DISTINCT commit_sha FROM runs WHERE epoch=?)",
-            (epoch, epoch),
-        ).fetchall()
+        epoch_commits = self.all_commits()
+        run_shas = {
+            row[0] for row in self._conn.execute(
+                "SELECT DISTINCT commit_sha FROM runs WHERE epoch=?", (epoch,)
+            ).fetchall()
+        }
         count = 0
-        for sha, tree_sha, short_sha in no_run:
-            source = self.find_run_by_tree_sha(tree_sha, exclude_sha=sha)
-            if source:
-                self.clone_run(source["run_id"], sha, reused_from_sha=source["short_sha"])
-                count += 1
+        for c in epoch_commits:
+            sha = c["sha"]
+            tree_sha = c.get("tree_sha")
+            if sha not in run_shas and tree_sha:
+                source = self.find_run_by_tree_sha(tree_sha, exclude_sha=sha)
+                if source:
+                    self.clone_run(source["run_id"], sha, reused_from_sha=source["short_sha"])
+                    count += 1
         return count
 
     def find_run_by_tree_sha(
@@ -390,12 +390,12 @@ class Store:
         self._conn.commit()
         return new_run_id
 
-    def save_commit(self, sha: str, short_sha: str, message: str, author: str, timestamp: int, branch: str, position: int = 0, tree_sha: str = "") -> None:
+    def save_commit(self, sha: str, short_sha: str, message: str, author: str, timestamp: int, branch: str, position: int = 0, tree_sha: str = "", parent_sha: str | None = None) -> None:
         epoch = self.current_epoch()
         self._conn.execute(
-            "INSERT INTO commits(sha, short_sha, message, author, timestamp, branch, epoch, position, tree_sha) VALUES(?,?,?,?,?,?,?,?,?)"
-            " ON CONFLICT(sha) DO UPDATE SET epoch=excluded.epoch, position=excluded.position, tree_sha=excluded.tree_sha",
-            (sha, short_sha, message, author, timestamp, branch, epoch, position, tree_sha or None),
+            "INSERT INTO commits(sha, short_sha, message, author, timestamp, branch, epoch, position, tree_sha, parent_sha) VALUES(?,?,?,?,?,?,?,?,?,?)"
+            " ON CONFLICT(sha) DO UPDATE SET position=excluded.position, tree_sha=excluded.tree_sha, parent_sha=excluded.parent_sha",
+            (sha, short_sha, message, author, timestamp, branch, epoch, position, tree_sha or None, parent_sha),
         )
         self._conn.commit()
 
@@ -559,24 +559,54 @@ class Store:
 
     def all_commits(self) -> list[dict]:
         epoch = self.current_epoch()
-        # Use commits.epoch first (fast path); fall back to joining through runs
-        # so that epochs whose commit rows were overwritten by a later epoch still work.
+        head_row = self._conn.execute("SELECT value FROM settings WHERE key=?", (f"epoch_{epoch}_head",)).fetchone()
+        head_sha = head_row[0] if head_row else None
+
+        # Fetch ALL known commits (any epoch) for the parent map
+        all_rows = self._conn.execute(
+            "SELECT sha, short_sha, message, author, timestamp, branch, parent_sha, tree_sha FROM commits"
+        ).fetchall()
+        by_sha = {r[0]: dict(zip(["sha", "short_sha", "message", "author", "timestamp", "branch", "parent_sha", "tree_sha"], r)) for r in all_rows}
+
+        # Commits we MUST show because we have run results for them in this epoch
+        run_shas = {
+            row[0] for row in self._conn.execute(
+                "SELECT DISTINCT commit_sha FROM runs WHERE epoch=?", (epoch,)
+            ).fetchall()
+        }
+
+        chain = []
+        if head_sha and head_sha in by_sha:
+            curr = head_sha
+            while curr and curr in by_sha:
+                chain.append(by_sha[curr])
+                curr = by_sha[curr]["parent_sha"]
+            chain = list(reversed(chain))
+
+        # Heuristic: the chain is valid if it covers all commits that have runs in this epoch.
+        # If it doesn't, it means parent_sha is missing or head is wrong — fall back to legacy.
+        chain_shas = {c["sha"] for c in chain}
+        if head_sha and run_shas.issubset(chain_shas):
+            return chain
+
+        # LEGACY FALLBACK: position-based ordering
+        # Attempt 1: from commits table (fast, includes pending)
         rows = self._conn.execute(
-            "SELECT sha, short_sha, message, author, timestamp, branch FROM commits WHERE epoch=? ORDER BY position ASC",
+            "SELECT sha, short_sha, message, author, timestamp, branch, parent_sha, tree_sha "
+            "FROM commits WHERE epoch=? ORDER BY position ASC",
             (epoch,),
         ).fetchall()
-        if rows:
-            return [dict(zip(["sha", "short_sha", "message", "author", "timestamp", "branch"], r)) for r in rows]
-        # Fallback: find commits referenced by runs for this epoch
-        rows = self._conn.execute(
-            """SELECT DISTINCT c.sha, c.short_sha, c.message, c.author, c.timestamp, c.branch
-               FROM commits c
-               JOIN runs r ON r.commit_sha = c.sha
-               WHERE r.epoch = ?
-               ORDER BY c.timestamp ASC""",
-            (epoch,),
-        ).fetchall()
-        return [dict(zip(["sha", "short_sha", "message", "author", "timestamp", "branch"], r)) for r in rows]
+        if not rows:
+            # Attempt 2: join runs (reliable for executed commits even if metadata clobbered)
+            rows = self._conn.execute(
+                """SELECT DISTINCT c.sha, c.short_sha, c.message, c.author, c.timestamp, c.branch, c.parent_sha, c.tree_sha
+                   FROM commits c
+                   JOIN runs r ON r.commit_sha = c.sha
+                   WHERE r.epoch = ?
+                   ORDER BY c.position ASC""",
+                (epoch,),
+            ).fetchall()
+        return [dict(zip(["sha", "short_sha", "message", "author", "timestamp", "branch", "parent_sha", "tree_sha"], r)) for r in rows]
 
     def runs_for_commit(self, commit_sha: str) -> list[dict]:
         epoch = self.current_epoch()
@@ -659,6 +689,60 @@ class Store:
     def update_jmh_json_path(self, run_id: int, new_path: str) -> None:
         self._conn.execute("UPDATE runs SET jmh_json_path=? WHERE id=?", (new_path, run_id))
         self._conn.commit()
+
+    def backfill_parents(self, repo_path: Path) -> int:
+        """Query git for missing parent_sha values and update the commits table."""
+        from . import git
+        rows = self._conn.execute("SELECT sha FROM commits WHERE parent_sha IS NULL").fetchall()
+        count = 0
+        for (sha,) in rows:
+            # Resolve parent via git log
+            # %P gives all parents; we take the first.
+            fmt = "%P"
+            try:
+                # We reuse the subprocess logic from git._run if possible, 
+                # but it's internal. git.list_commits is high-level.
+                # Let's add a small helper to git.py or just run it here.
+                import subprocess
+                res = subprocess.run(
+                    ["git", "log", "-1", f"--format={fmt}", sha],
+                    cwd=repo_path, capture_output=True, text=True
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    parent_sha = res.stdout.strip().split()[0]
+                    self._conn.execute("UPDATE commits SET parent_sha=? WHERE sha=?", (parent_sha, sha))
+                    count += 1
+            except Exception:
+                continue
+        self._conn.commit()
+        return count
+
+    def backfill_epoch_heads(self) -> int:
+        """Try to infer the head commit for epochs that don't have one set in settings.
+        Picks the commit with the highest 'position' among those that have runs in this epoch.
+        """
+        all_eps = self.all_epochs()
+        count = 0
+        for ep in all_eps:
+            head_key = f"epoch_{ep}_head"
+            row = self._conn.execute("SELECT value FROM settings WHERE key=?", (head_key,)).fetchone()
+            if row:
+                continue
+
+            # Find the commit with the highest position that actually has a run in this epoch.
+            # This is a much better guess for 'head' than just highest position in the commits table
+            # (which might have been clobbered by a later, longer branch).
+            res = self._conn.execute(
+                """SELECT r.commit_sha FROM runs r
+                   JOIN commits c ON r.commit_sha = c.sha
+                   WHERE r.epoch=?
+                   ORDER BY c.position DESC LIMIT 1""",
+                (ep,)
+            ).fetchone()
+            if res:
+                self.set_epoch_head(ep, res[0])
+                count += 1
+        return count
 
     def secondary_metrics_for(self, run_id: int) -> list[dict]:
         rows = self._conn.execute(

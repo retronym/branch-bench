@@ -13,6 +13,7 @@ class Commit:
     timestamp: int
     message: str
     tree_sha: str = ""
+    parent_sha: str | None = None
 
 
 def _run(args: list[str], cwd: Path) -> str:
@@ -51,7 +52,7 @@ def find_merge_base(repo: Path, branch: str, base_branches: list[str] = ["main",
 
 
 def list_commits(repo: Path, branch: str, max_count: int | None = None, exclude_before: str | None = None) -> list[Commit]:
-    fmt = "%H\x1f%T\x1f%ae\x1f%at\x1f%s"
+    fmt = "%H\x1f%T\x1f%P\x1f%ae\x1f%at\x1f%s"
     # Use <merge-base>..<branch> to exclude commits shared with main/master
     ref = f"{exclude_before}..{branch}" if exclude_before else branch
     args = ["git", "log", f"--format={fmt}", ref]
@@ -62,8 +63,17 @@ def list_commits(repo: Path, branch: str, max_count: int | None = None, exclude_
         return []
     commits = []
     for line in output.splitlines():
-        sha, tree_sha, author, ts, message = line.split("\x1f", 4)
-        commits.append(Commit(sha=sha, short_sha=sha[:8], author=author, timestamp=int(ts), message=message, tree_sha=tree_sha))
+        sha, tree_sha, parents, author, ts, message = line.split("\x1f", 5)
+        parent_sha = parents.split()[0] if parents else None
+        commits.append(Commit(
+            sha=sha,
+            short_sha=sha[:8],
+            author=author,
+            timestamp=int(ts),
+            message=message,
+            tree_sha=tree_sha,
+            parent_sha=parent_sha,
+        ))
     # Return oldest-first so we process in chronological order
     return list(reversed(commits))
 
