@@ -192,28 +192,29 @@ def generate(store: Store, output_path: Path, github_url: str | None = None, nex
             entry = {**d, "diff_path": _rebase(d["diff_path"], report_dir)}
             diffs_by_vs.setdefault(d["diff_vs"], []).append(entry)
 
-        # Summary from latest bench run
+        # Summary from latest bench run with results
         latest_test = None
         latest_scores: list[dict] = []
-        if commit_run_rows:
-            last = commit_run_rows[-1]
-            latest_test = last["test"]
-            if bench_runs:
-                latest_scores = store.benchmark_results_for(bench_runs[-1]["id"])
-
-        # Collect all profiles across bench + profile runs for the commit-level badge
         latest_bench_profiles: list[dict] = []
-        if bench_runs:
-            latest_bench_profiles = [
-                {"event": p["event"], "file_path": _rebase(p["file_path"], report_dir)}
-                for p in store.profiles_for(bench_runs[-1]["id"])
-            ]
+
+        # Find the latest bench run that actually has scores
+        for run in reversed(commit_run_rows):
+            if run["scores"]:
+                latest_test = run["test"]
+                latest_scores = run["scores"]
+                latest_bench_profiles = run["profiles"]
+                break
+        else:
+            # Fallback to absolute latest if none have scores
+            if commit_run_rows:
+                last = commit_run_rows[-1]
+                latest_test = last["test"]
+                latest_scores = last["scores"]
+                latest_bench_profiles = last["profiles"]
+
         latest_profile_profiles: list[dict] = []
-        if profile_runs:
-            latest_profile_profiles = [
-                {"event": p["event"], "file_path": _rebase(p["file_path"], report_dir)}
-                for p in store.profiles_for(profile_runs[-1]["id"])
-            ]
+        if profile_run_rows:
+            latest_profile_profiles = profile_run_rows[-1]["profiles"]
 
         commit_rows.append({
             "sha": commit["sha"],

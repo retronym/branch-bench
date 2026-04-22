@@ -524,6 +524,7 @@ def run_branch(
 
     log(f"Found {len(run_range)} commit(s) on branch '{cfg.repo.branch}'")
 
+    epoch = store.current_epoch()
     for i, commit in enumerate(all_commits):
         store.save_commit(
             sha=commit.sha,
@@ -562,7 +563,6 @@ def run_branch(
             log("No matching commits to run.")
             return
 
-    epoch = store.current_epoch()
     report_path = cfg.report_path(epoch)
     running_log: _RunningLog | None = None
     if live_report:
@@ -833,7 +833,6 @@ def profile_branch(
 
     log(f"Found {len(run_commits)} commit(s) to profile")
 
-    epoch = store.current_epoch()
     report_path = cfg.report_path(epoch)
 
     # Resolve any SHA-based diff targets upfront

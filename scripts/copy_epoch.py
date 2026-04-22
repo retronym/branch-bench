@@ -174,6 +174,17 @@ def main() -> None:
                 diff_count += 1
             print(f"  Inserted {diff_count} diffs with epoch={dst_epoch}")
 
+            # --- settings (epoch_head, epoch_base) ---
+            for suffix in ["head", "base"]:
+                key = f"epoch_{src_epoch}_{suffix}"
+                res = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+                if res:
+                    conn.execute(
+                        "INSERT INTO settings (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (f"epoch_{dst_epoch}_{suffix}", res["value"]),
+                    )
+            print(f"  Copied epoch_{dst_epoch}_head/base settings")
+
     finally:
         conn.close()
 

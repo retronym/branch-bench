@@ -937,17 +937,34 @@ function benchGroupOf(name) {
 }
 
 function renderScoreCell(td, c) {
-  let scores;
-  if (runsMode === 'all' || runsMode === 'latest') {
+  let scores = [];
+  const none = selectedBenchmarks.size === 0;
+  
+  if (runsMode === 'latest') {
+    // Look backwards for the latest run that has results for any of our selected benchmarks
+    for (let i = c.runs.length - 1; i >= 0; i--) {
+      const s = c.runs[i].scores;
+      const filtered = none ? s : s.filter(x => selectedBenchmarks.has(benchGroupOf(x.benchmark)));
+      if (filtered.length > 0) {
+        scores = filtered;
+        break;
+      }
+    }
+  } else if (runsMode === 'all') {
+    // Show scores from the absolute latest run (legacy behavior for 'all' mode)
     scores = c.runs.length > 0 ? c.runs[c.runs.length - 1].scores : [];
+    if (!none) scores = scores.filter(s => selectedBenchmarks.has(benchGroupOf(s.benchmark)));
   } else if (runsMode.startsWith('run_')) {
     const ri = parseInt(runsMode.slice(4));
     scores = ri < c.runs.length ? c.runs[ri].scores : [];
+    if (!none) scores = scores.filter(s => selectedBenchmarks.has(benchGroupOf(s.benchmark)));
   } else if (runsMode === 'aggregate') {
     const byBench = {};
     for (const run of c.runs) {
       for (const s of run.scores) {
-        (byBench[s.benchmark] = byBench[s.benchmark] || []).push(s);
+        if (none || selectedBenchmarks.has(benchGroupOf(s.benchmark))) {
+          (byBench[s.benchmark] = byBench[s.benchmark] || []).push(s);
+        }
       }
     }
     scores = Object.entries(byBench).map(([benchmark, arr]) => {
@@ -956,12 +973,6 @@ function renderScoreCell(td, c) {
       const mean = arr.reduce((a, s) => a + s.score, 0) / arr.length;
       return { benchmark, score: mean, score_error: null, unit: arr[0].unit };
     });
-  } else {
-    scores = [];
-  }
-
-  if (selectedBenchmarks.size > 0 && scores) {
-    scores = scores.filter(s => selectedBenchmarks.has(benchGroupOf(s.benchmark)));
   }
 
   if (!scores || scores.length === 0) {
@@ -970,6 +981,7 @@ function renderScoreCell(td, c) {
   }
   const multiGroup = benchGroups.length > 1 && selectedBenchmarks.size !== 1;
   td.innerHTML = scores.map(s => {
+    if (s.score === null || s.score === undefined) return '';
     const scoreStr = s.score.toPrecision(6);
     const err = s.score_error != null
       ? ` <span class="score-err">± ${s.score_error.toPrecision(3)}</span>` : '';
@@ -1548,58 +1560,62 @@ const tbody = document.getElementById('tbody');
 const rowBySha = {};
 
 for (const c of commits) {
-  const runCount = c.runs.length;
-  const isPending = runCount === 0 && (!c.profile_runs || c.profile_runs.length === 0);
-  const isInProgress = !!c.in_progress;
-  const commitTr = document.createElement('tr');
-  commitTr.className = 'commit-row' + (isPending ? ' pending' : '') + (isInProgress ? ' in-progress' : '');
-  commitTr.id = 'commit-' + c.short_sha;
+  try {
+    const runCount = c.runs ? c.runs.length : 0;
+    const isPending = runCount === 0 && (!c.profile_runs || c.profile_runs.length === 0);
+    const isInProgress = !!c.in_progress;
+    const commitTr = document.createElement('tr');
+    commitTr.className = 'commit-row' + (isPending ? ' pending' : '') + (isInProgress ? ' in-progress' : '');
+    commitTr.id = 'commit-' + (c.short_sha || 'unknown');
 
-  let testCell = '<span class="na">—</span>';
-  if (c.latest_test !== null && c.latest_test !== undefined) {
-    testCell = c.latest_test.passed
-      ? '<span class="pass">✓</span>'
-      : '<span class="fail">✗</span>';
-  }
+    let testCell = '<span class="na">—</span>';
+    if (c.latest_test !== null && c.latest_test !== undefined) {
+      testCell = c.latest_test.passed
+        ? '<span class="pass">✓</span>'
+        : '<span class="fail">✗</span>';
+    }
 
-  const totalRuns = runCount + (c.profile_runs ? c.profile_runs.length : 0);
-  const runLabel = isPending
-    ? '<span class="na">pending</span>'
-    : `${totalRuns} run${totalRuns !== 1 ? 's' : ''} <span class="toggle">[expand]</span>`;
+    const totalRuns = runCount + (c.profile_runs ? c.profile_runs.length : 0);
+    const runLabel = isPending
+      ? '<span class="na">pending</span>'
+      : `${totalRuns} run${totalRuns !== 1 ? 's' : ''} <span class="toggle">[expand]</span>`;
 
-  const artifactsHtml = _commitArtifactsHtml(c);
+    const artifactsHtml = _commitArtifactsHtml(c);
+    const msg = c.message || '';
+    const tsStr = c.ts || '';
 
-  // Compare checkbox (server mode only)
-  const cbHtml = serverMode
-    ? `<input type="checkbox" class="compare-cb" data-sha="${esc(c.sha)}" style="margin-right:0.3rem" title="Select for comparison"
-         onclick="event.stopPropagation()"
-         onchange="(function(sha,cb){if(cb.checked){selectedForCompare.add(sha)}else{selectedForCompare.delete(sha)};_updateCompareBar();replaceUrlState()})('${esc(c.sha)}',this)">`
-    : '';
+    // Compare checkbox (server mode only)
+    const cbHtml = serverMode
+      ? `<input type="checkbox" class="compare-cb" data-sha="${esc(c.sha)}" style="margin-right:0.3rem" title="Select for comparison"
+           onclick="event.stopPropagation()"
+           onchange="(function(sha,cb){if(cb.checked){selectedForCompare.add(sha)}else{selectedForCompare.delete(sha)};_updateCompareBar();replaceUrlState()})('${esc(c.sha)}',this)">`
+      : '';
 
-  const shaLink = githubUrl
-    ? `<a href="${githubUrl}/commit/${esc(c.sha)}" target="_blank" rel="noopener"
-          title="View diff on GitHub" style="font-family:monospace;font-size:0.78rem"
-          onclick="event.stopPropagation()">${esc(c.short_sha)}</a>`
-    : `<code style="font-size:0.78rem">${esc(c.short_sha)}</code>`;
-  const copyBtn = `<button class="copy-sha" title="Copy full SHA"
-    onclick="event.stopPropagation();navigator.clipboard.writeText('${esc(c.sha)}').then(()=>showToast('Copied ${esc(c.short_sha)}'))"
-    >⎘</button>`;
-  const progressSpinner = isInProgress ? '<span class="progress-spinner"></span>' : '';
-  commitTr.innerHTML = `
-    <td style="white-space:nowrap">${cbHtml}${progressSpinner}${shaLink} ${copyBtn}</td>
-    <td>${esc(c.message.substring(0, 72))}</td>
-    <td style="white-space:nowrap">${esc(c.ts)}</td>
-    <td>${testCell}</td>
-    <td></td>
-    <td>${artifactsHtml ? `<div class="commit-artifacts" style="margin-bottom:0.35rem">${artifactsHtml}</div>` : ''}${runLabel}</td>
-  `;
-  tbody.appendChild(commitTr);
+    const shaLink = (githubUrl && c.sha)
+      ? `<a href="${githubUrl}/commit/${esc(c.sha)}" target="_blank" rel="noopener"
+            title="View diff on GitHub" style="font-family:monospace;font-size:0.78rem"
+            onclick="event.stopPropagation()">${esc(c.short_sha)}</a>`
+      : `<code style="font-size:0.78rem">${esc(c.short_sha || '????')}</code>`;
+    const copyBtn = c.sha ? `<button class="copy-sha" title="Copy full SHA"
+      onclick="event.stopPropagation();navigator.clipboard.writeText('${esc(c.sha)}').then(()=>showToast('Copied ${esc(c.short_sha)}'))"
+      >⎘</button>` : '';
+    const progressSpinner = isInProgress ? '<span class="progress-spinner"></span>' : '';
+    commitTr.innerHTML = `
+      <td style="white-space:nowrap">${cbHtml}${progressSpinner}${shaLink} ${copyBtn}</td>
+      <td>${esc(msg.substring(0, 72))}</td>
+      <td style="white-space:nowrap">${esc(tsStr)}</td>
+      <td>${testCell}</td>
+      <td></td>
+      <td>${artifactsHtml ? `<div class="commit-artifacts" style="margin-bottom:0.35rem">${artifactsHtml}</div>` : ''}${runLabel}</td>
+    `;
+    tbody.appendChild(commitTr);
 
-  const scoreTd = commitTr.cells[4];
-  renderScoreCell(scoreTd, c);
-  scoreUpdaters.push(() => renderScoreCell(scoreTd, c));
+    const scoreTd = commitTr.cells[4];
+    renderScoreCell(scoreTd, c);
+    scoreUpdaters.push(() => renderScoreCell(scoreTd, c));
 
-  const runRows = [];
+    const runRows = [];
+    // ... (rest of bench/profile run rows)
 
   // ── Bench run rows ────────────────────────────────────────────────────────
   for (const r of c.runs) {
@@ -1692,26 +1708,29 @@ for (const c of commits) {
     runRows.push(tr);
   }
 
-  function setExpanded(expanded) {
-    runRows.forEach(tr => tr.classList.toggle('hidden', !expanded));
-    const toggle = commitTr.querySelector('.toggle');
-    if (toggle) toggle.textContent = expanded ? '[collapse]' : '[expand]';
-    const commitArts = commitTr.querySelector('.commit-artifacts');
-    if (commitArts) commitArts.style.display = expanded ? 'none' : '';
+    function setExpanded(expanded) {
+      runRows.forEach(tr => tr.classList.toggle('hidden', !expanded));
+      const toggle = commitTr.querySelector('.toggle');
+      if (toggle) toggle.textContent = expanded ? '[collapse]' : '[expand]';
+      const commitArts = commitTr.querySelector('.commit-artifacts');
+      if (commitArts) commitArts.style.display = expanded ? 'none' : '';
+    }
+
+    rowBySha[c.short_sha] = setExpanded;
+
+    commitTr.addEventListener('click', () => {
+      if (window.getSelection()?.toString()) return;
+      const expanding = runRows[0]?.classList.contains('hidden');
+      setExpanded(expanding);
+      const sp0 = new URLSearchParams(location.search);
+      const shas = new Set((sp0.get('expand') ?? '').split(',').filter(Boolean));
+      expanding ? shas.add(c.short_sha) : shas.delete(c.short_sha);
+      pushUrlState(shas);
+      if (expanding) commitTr.scrollIntoView({ block: 'nearest' });
+    });
+  } catch (e) {
+    console.error("Error rendering commit row:", c, e);
   }
-
-  rowBySha[c.short_sha] = setExpanded;
-
-  commitTr.addEventListener('click', () => {
-    if (window.getSelection()?.toString()) return;
-    const expanding = runRows[0]?.classList.contains('hidden');
-    setExpanded(expanding);
-    const sp0 = new URLSearchParams(location.search);
-    const shas = new Set((sp0.get('expand') ?? '').split(',').filter(Boolean));
-    expanding ? shas.add(c.short_sha) : shas.delete(c.short_sha);
-    pushUrlState(shas);
-    if (expanding) commitTr.scrollIntoView({ block: 'nearest' });
-  });
 }
 
 // ── Live log ──────────────────────────────────────────────────────────────────

@@ -596,16 +596,20 @@ class Store:
             "FROM commits WHERE epoch=? ORDER BY position ASC",
             (epoch,),
         ).fetchall()
-        if not rows:
-            # Attempt 2: join runs (reliable for executed commits even if metadata clobbered)
-            rows = self._conn.execute(
-                """SELECT DISTINCT c.sha, c.short_sha, c.message, c.author, c.timestamp, c.branch, c.parent_sha, c.tree_sha
-                   FROM commits c
-                   JOIN runs r ON r.commit_sha = c.sha
-                   WHERE r.epoch = ?
-                   ORDER BY c.position ASC""",
-                (epoch,),
-            ).fetchall()
+        row_shas = {r[0] for r in rows}
+        if rows and run_shas.issubset(row_shas):
+            return [dict(zip(["sha", "short_sha", "message", "author", "timestamp", "branch", "parent_sha", "tree_sha"], r)) for r in rows]
+
+        # Attempt 2: join runs (reliable for executed commits even if metadata clobbered or copied)
+        # This is the most reliable way to find which commits belong in a historical epoch report.
+        rows = self._conn.execute(
+            """SELECT DISTINCT c.sha, c.short_sha, c.message, c.author, c.timestamp, c.branch, c.parent_sha, c.tree_sha
+               FROM runs r
+               JOIN commits c ON r.commit_sha = c.sha
+               WHERE r.epoch = ?
+               ORDER BY c.timestamp ASC, c.position ASC""",
+            (epoch,),
+        ).fetchall()
         return [dict(zip(["sha", "short_sha", "message", "author", "timestamp", "branch", "parent_sha", "tree_sha"], r)) for r in rows]
 
     def runs_for_commit(self, commit_sha: str) -> list[dict]:
