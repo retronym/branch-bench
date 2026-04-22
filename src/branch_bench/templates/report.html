@@ -114,7 +114,11 @@
   }
   #diff-panel-close:hover { color: #e6edf3; }
   #diff-panel-body {
-    flex: 1 1 0; min-height: 0; overflow-y: auto; padding: 0.75rem 1rem;
+    flex: 1 1 0; min-height: 0; overflow-y: auto;
+    display: flex; flex-direction: column;
+  }
+  #diff-widget-grid {
+    flex: 1 1 0; min-height: 0; padding: 0.75rem 1rem;
     display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: stretch; align-content: stretch;
   }
   /* ── Diff widget (LEFT | DIFF | RIGHT tabs) ── */
@@ -124,6 +128,11 @@
   }
   .dw-stem { font-size: 0.72rem; font-family: monospace; color: #8b949e; padding: 0.18rem 0.4rem; margin-right: 0.15rem; border-right: 1px solid #30363d; }
   .dw-tabs { display: flex; gap: 0.25rem; align-items: center; flex-wrap: wrap; }
+  .dw-kbd { font-size: 0.72rem;  color: #c9d1d9; font-family: monospace; margin-left: auto;
+    padding: 0.15rem 0.45rem; border: 1px solid #30363d; border-radius: 3px; cursor: default;
+    transition: color 0.1s, border-color 0.1s; white-space: nowrap; }
+  .dw-kbd:hover {border-color: #8b949e; }
+  .dw-kbd-icon {font-size: 1rem;}
   .dw-tab {
     background: none; border: 1px solid #30363d; color: #8b949e;
     border-radius: 4px; padding: 0.18rem 0.5rem; cursor: pointer;
@@ -141,6 +150,41 @@
     position: absolute; inset: 0; width: 100%; height: 100%;
     border: 1px solid #30363d; border-radius: 4px; background: #fff;
   }
+  /* ── Diff widget hide/show ── */
+  .dw-hide-btn {
+    background: none; border: 1px solid transparent; color: #484f58;
+    border-radius: 3px; padding: 0.1rem 0.3rem; cursor: pointer;
+    font-size: 0.78rem; line-height: 1; flex-shrink: 0;
+  }
+  .dw-hide-btn:hover { color: #8b949e; border-color: #30363d; }
+  #diff-hidden-row {
+    width: 100%; display: none; flex-wrap: wrap; gap: 0.4rem;
+    padding: 0.3rem 0.25rem 0.45rem; border-bottom: 1px solid #21262d;
+    align-items: center; flex-shrink: 0;
+  }
+  #diff-hidden-row.has-items { display: flex; }
+  .diff-hidden-chip {
+    display: inline-flex; align-items: center; gap: 0.35rem;
+    background: #21262d; border: 1px solid #30363d; border-radius: 4px;
+    padding: 0.15rem 0.5rem 0.15rem 0.4rem; font-size: 0.72rem;
+    font-family: monospace; color: #8b949e; cursor: pointer; user-select: none;
+  }
+  .diff-hidden-chip:hover { border-color: #58a6ff55; color: #e6edf3; }
+  .diff-hidden-chip-show { color: #388bfd; font-size: 0.85rem; margin-left: 0.1rem; }
+  /* ── Diff panel layout control ── */
+  #diff-layout-btns { display: flex; gap: 0.2rem; align-items: center; margin-right: 0.5rem; }
+  .diff-layout-btn {
+    background: none; border: 1px solid #30363d; color: #484f58;
+    border-radius: 3px; padding: 0.18rem 0.35rem; cursor: pointer;
+    line-height: 0; display: flex; align-items: center;
+  }
+  .diff-layout-btn svg { display: block; }
+  .diff-layout-btn.active { border-color: #388bfd88; color: #58a6ff; background: #21262d; }
+  .diff-layout-btn:hover:not(.active) { color: #8b949e; border-color: #8b949e; }
+  /* Column layout overrides */
+  #diff-widget-grid.cols-1 .diff-widget { flex: 0 0 100%; min-width: 0; }
+  #diff-widget-grid.cols-2 .diff-widget { flex: 0 0 calc(50% - 0.375rem); min-width: 0; }
+  #diff-widget-grid.cols-4 .diff-widget { flex: 0 0 calc(25% - 0.5625rem); min-width: 0; }
   /* ── Compare button (server mode) ── */
   #compare-bar {
     position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%);
@@ -307,6 +351,17 @@
   <div id="diff-panel-resize"></div>
   <div id="diff-panel-hdr">
     <span id="diff-panel-title">Diff results</span>
+    <div id="diff-layout-btns">
+      <button class="diff-layout-btn" data-cols="1" title="1 column" onclick="setDiffLayout(1)">
+        <svg width="14" height="10" viewBox="0 0 14 10"><rect x="1" y="1" width="12" height="8" rx="1" fill="currentColor"/></svg>
+      </button>
+      <button class="diff-layout-btn" data-cols="2" title="2 columns" onclick="setDiffLayout(2)">
+        <svg width="14" height="10" viewBox="0 0 14 10"><rect x="1" y="1" width="5" height="8" rx="1" fill="currentColor"/><rect x="8" y="1" width="5" height="8" rx="1" fill="currentColor"/></svg>
+      </button>
+      <button class="diff-layout-btn" data-cols="4" title="4 columns" onclick="setDiffLayout(4)">
+        <svg width="14" height="10" viewBox="0 0 14 10"><rect x="1" y="1" width="2" height="8" rx="1" fill="currentColor"/><rect x="4.5" y="1" width="2" height="8" rx="1" fill="currentColor"/><rect x="8" y="1" width="2" height="8" rx="1" fill="currentColor"/><rect x="11.5" y="1" width="2" height="8" rx="1" fill="currentColor"/></svg>
+      </button>
+    </div>
     <button id="diff-panel-close" onclick="closeDiffPanel()">✕</button>
   </div>
   <div id="diff-panel-body"></div>
@@ -792,6 +847,8 @@ for (const [name, bd] of Object.entries(benchData)) {
 
 // Tracks which diff pair is currently open in the panel
 let _diffLeft = '', _diffRight = '';
+let _diffColLayout = (() => { try { return parseInt(localStorage.getItem('bb-diff-cols') || '0') || 0; } catch { return 0; } })();
+let _diffWidgets = []; // [{el, stem, hidden, chip}] in render order
 
 function _buildUrl(shas, useReplace) {
   if (shas === undefined) {
@@ -1043,6 +1100,48 @@ function closeDiffPanel() {
   replaceUrlState();
 }
 
+function setDiffLayout(n) {
+  _diffColLayout = n;
+  try { localStorage.setItem('bb-diff-cols', n); } catch {}
+  const grid = document.getElementById('diff-widget-grid');
+  if (grid) {
+    grid.classList.remove('cols-1', 'cols-2', 'cols-4');
+    if (n) grid.classList.add(`cols-${n}`);
+  }
+  document.querySelectorAll('.diff-layout-btn').forEach(b =>
+    b.classList.toggle('active', parseInt(b.dataset.cols) === n));
+}
+
+function _hideWidget(idx) {
+  const entry = _diffWidgets[idx];
+  if (!entry || entry.hidden) return;
+  entry.hidden = true;
+  entry.el.remove();
+  const row = document.getElementById('diff-hidden-row');
+  const chip = document.createElement('div');
+  chip.className = 'diff-hidden-chip';
+  chip.title = 'Click to show';
+  chip.innerHTML = `<span>${entry.stem}</span><span class="diff-hidden-chip-show">⊞</span>`;
+  chip.onclick = () => _showWidget(idx);
+  entry.chip = chip;
+  row.appendChild(chip);
+  row.classList.add('has-items');
+}
+
+function _showWidget(idx) {
+  const entry = _diffWidgets[idx];
+  if (!entry || !entry.hidden) return;
+  entry.hidden = false;
+  entry.chip?.remove();
+  entry.chip = null;
+  const grid = document.getElementById('diff-widget-grid');
+  const after = _diffWidgets.slice(idx + 1).find(w => !w.hidden);
+  if (after) grid.insertBefore(entry.el, after.el);
+  else grid.appendChild(entry.el);
+  document.getElementById('diff-hidden-row')
+    .classList.toggle('has-items', _diffWidgets.some(w => w.hidden));
+}
+
 async function runCompare() {
   const [left, right] = [...selectedForCompare];
   const btn = document.getElementById('compare-btn');
@@ -1120,9 +1219,23 @@ function _standaloneViewHtml(slots, title) {
     framesHtml += `<iframe src="${he(s.src)}" data-view="${he(s.id)}"${s.id !== def ? ' class="hidden"' : ''}></iframe>`;
   }
   return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>${he(title)}</title>
-<style>*{box-sizing:border-box;margin:0;padding:0}body{background:#0d1117;color:#e6edf3;font-family:system-ui,sans-serif;height:100vh;display:flex;flex-direction:column}#hdr{display:flex;align-items:center;gap:0.3rem;padding:0.35rem 0.75rem;background:#161b22;border-bottom:1px solid #30363d;flex-shrink:0;flex-wrap:wrap}.tab{background:none;border:1px solid #30363d;color:#8b949e;border-radius:4px;padding:0.2rem 0.55rem;cursor:pointer;font-size:0.75rem;font-family:monospace}.tab:hover{color:#e6edf3}.tab.active{color:#e6edf3;background:#21262d;border-color:#388bfd88}.ext{font-size:0.65rem;color:#484f58;text-decoration:none;margin-right:0.35rem}.ext:hover{color:#58a6ff}#body{flex:1;position:relative;min-height:0}iframe{position:absolute;inset:0;width:100%;height:100%;border:none;transition:opacity 0.1s}iframe.hidden{opacity:0;pointer-events:none}</style></head>
-<body><div id="hdr">${tabsHtml}</div><div id="body">${framesHtml}</div>
-<script>document.getElementById('hdr').addEventListener('click',function(e){const btn=e.target.closest('.tab');if(!btn)return;const v=btn.dataset.view;document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b.dataset.view===v));document.querySelectorAll('#body iframe').forEach(f=>f.classList.toggle('hidden',f.dataset.view!==v));});<\/script>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{background:#0d1117;color:#e6edf3;font-family:system-ui,sans-serif;height:100vh;display:flex;flex-direction:column}#hdr{display:flex;align-items:center;gap:0.3rem;padding:0.35rem 0.75rem;background:#161b22;border-bottom:1px solid #30363d;flex-shrink:0;flex-wrap:wrap}.tab{background:none;border:1px solid #30363d;color:#8b949e;border-radius:4px;padding:0.2rem 0.55rem;cursor:pointer;font-size:0.75rem;font-family:monospace}.tab:hover{color:#e6edf3}.tab.active{color:#e6edf3;background:#21262d;border-color:#388bfd88}.ext{font-size:0.65rem;color:#484f58;text-decoration:none;margin-right:0.35rem}.ext:hover{color:#58a6ff}.kbd{font-size:0.72rem;color:#484f58;font-family:monospace;margin-left:auto;padding:0.15rem 0.45rem;border:1px solid #30363d;border-radius:3px;cursor:default}.kbd:hover{color:#c9d1d9;border-color:#8b949e}#body{flex:1;position:relative;min-height:0}iframe{position:absolute;inset:0;width:100%;height:100%;border:none;transition:opacity 0.1s}iframe.hidden{opacity:0;pointer-events:none}</style></head>
+<body><div id="hdr">${tabsHtml}<span class="kbd" title="Keyboard: 1–4 select tab, [ ] previous/next">⌨ 1–4  [ ]</span></div><div id="body">${framesHtml}</div>
+<script>
+const _tabs=()=>Array.from(document.querySelectorAll('.tab'));
+function _act(btn){const v=btn.dataset.view;_tabs().forEach(b=>b.classList.toggle('active',b.dataset.view===v));document.querySelectorAll('#body iframe').forEach(f=>f.classList.toggle('hidden',f.dataset.view!==v));}
+document.getElementById('hdr').addEventListener('click',e=>{const b=e.target.closest('.tab');if(b)_act(b);});
+document.addEventListener('keydown',e=>{
+  if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA')return;
+  const tabs=_tabs(),cur=tabs.findIndex(t=>t.classList.contains('active'));
+  const n=parseInt(e.key);
+  let t=null;
+  if(n>=1&&n<=9)t=tabs[n-1];
+  else if(e.key==='[')t=tabs[(cur-1+tabs.length)%tabs.length];
+  else if(e.key===']')t=tabs[(cur+1)%tabs.length];
+  if(t){_act(t);e.preventDefault();}
+});
+<\/script>
 </body></html>`;
 }
 
@@ -1149,7 +1262,7 @@ function _buildViewUrl(g, left8, right8) {
   return URL.createObjectURL(new Blob([_standaloneViewHtml(slots, `${left8} vs ${right8}`)], {type:'text/html'}));
 }
 
-function _makeDiffWidget(g, left8, right8) {
+function _makeDiffWidget(g, left8, right8, idx) {
   // Determine ordered slots
   const ORDER = ['left', 'diff', 'inv', 'right'];
   const _fname = p => p.split('/').pop();
@@ -1171,6 +1284,14 @@ function _makeDiffWidget(g, left8, right8) {
   // Tab bar
   const tabBar = document.createElement('div');
   tabBar.className = 'dw-tabs';
+
+  // Hide button (top-left of widget)
+  const hideBtn = document.createElement('button');
+  hideBtn.className = 'dw-hide-btn';
+  hideBtn.title = 'Hide panel';
+  hideBtn.textContent = '⊟';
+  hideBtn.onclick = e => { e.stopPropagation(); _hideWidget(idx); };
+  tabBar.appendChild(hideBtn);
 
   if (g.stem) {
     const lbl = document.createElement('span');
@@ -1195,6 +1316,13 @@ function _makeDiffWidget(g, left8, right8) {
   openLink.title = 'Open full-screen';
   openLink.textContent = '↗';
   tabBar.appendChild(openLink);
+
+  // Keyboard hint badge
+  const kbdHint = document.createElement('span');
+  kbdHint.className = 'dw-kbd';
+  kbdHint.title = 'Keyboard: 1–4 select tab, [ ] previous/next';
+  kbdHint.innerHTML = '<span class="dw-kbd-icon">⌨</span> 1–4  [ ]';
+  tabBar.appendChild(kbdHint);
 
   // Body with iframes
   const body = document.createElement('div');
@@ -1246,18 +1374,73 @@ function _makeDiffWidget(g, left8, right8) {
   return wrap;
 }
 
+// Keyboard nav for diff panel: 1-4 = select tab N, [ ] = prev/next tab
+let _diffKbdWidget = null; // last-hovered widget
+(function() {
+  function _activeWidget() {
+    const panel = document.getElementById('diff-panel-body');
+    if (!panel) return null;
+    // prefer hovered, fall back to first
+    return _diffKbdWidget || panel.querySelector('.diff-widget');
+  }
+  function _clickTab(widget, idx) {
+    const tabs = widget.querySelectorAll('.dw-tab');
+    if (tabs[idx]) tabs[idx].click();
+  }
+  function _shiftTab(widget, delta) {
+    const tabs = Array.from(widget.querySelectorAll('.dw-tab'));
+    const cur = tabs.findIndex(t => t.classList.contains('active'));
+    const next = (cur + delta + tabs.length) % tabs.length;
+    tabs[next].click();
+  }
+  document.addEventListener('keydown', e => {
+    if (!document.getElementById('diff-panel')?.classList.contains('visible')) return;
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) return;
+    const w = _activeWidget();
+    if (!w) return;
+    const n = parseInt(e.key);
+    if (n >= 1 && n <= 4)       { _clickTab(w, n - 1); e.preventDefault(); }
+    else if (e.key === '[')     { _shiftTab(w, -1);    e.preventDefault(); }
+    else if (e.key === ']')     { _shiftTab(w,  1);    e.preventDefault(); }
+  });
+})();
+
 function _renderDiffPanel(left, right, diffs, leftProfiles, rightProfiles) {
   const body = document.getElementById('diff-panel-body');
   body.innerHTML = '';
+  _diffKbdWidget = null;
+  _diffWidgets = [];
+
+  // Hidden-widget row (sits at top of body, spans full width)
+  const hiddenRow = document.createElement('div');
+  hiddenRow.id = 'diff-hidden-row';
+  body.appendChild(hiddenRow);
+
+  // Widget grid (fills remaining space, stretches widgets)
+  const grid = document.createElement('div');
+  grid.id = 'diff-widget-grid';
+  if (_diffColLayout) grid.classList.add(`cols-${_diffColLayout}`);
+  body.appendChild(grid);
+
   const left8 = left.slice(0, 8), right8 = right.slice(0, 8);
   const groups = _groupArtifactsAndDiffs(diffs, leftProfiles, rightProfiles, left8, right8);
   let rendered = 0;
   for (const g of groups) {
-    const w = _makeDiffWidget(g, left8, right8);
-    if (w) { body.appendChild(w); rendered++; }
+    const idx = _diffWidgets.length;
+    _diffWidgets.push({ el: null, stem: g.stem || `#${idx + 1}`, hidden: false, chip: null });
+    const w = _makeDiffWidget(g, left8, right8, idx);
+    if (w) {
+      _diffWidgets[idx].el = w;
+      w.addEventListener('mouseenter', () => { _diffKbdWidget = w; });
+      w.addEventListener('mouseleave', () => { if (_diffKbdWidget === w) _diffKbdWidget = null; });
+      grid.appendChild(w);
+      rendered++;
+    } else {
+      _diffWidgets.pop();
+    }
   }
   if (!rendered) {
-    body.innerHTML = '<span style="color:#484f58;font-size:0.82rem">No viewable artifacts or diffs found for this pair.</span>';
+    grid.innerHTML = '<span style="color:#484f58;font-size:0.82rem">No viewable artifacts or diffs found for this pair.</span>';
   }
 }
 
@@ -1293,7 +1476,13 @@ function _showDiffResults(left, right, diffs, leftProfiles = [], rightProfiles =
     handle.classList.remove('dragging');
     document.removeEventListener('mousemove', onMove);
     document.removeEventListener('mouseup', onUp);
+    try { localStorage.setItem('bb-diff-panel-h', panel.offsetHeight); } catch {}
   }
+  // Restore saved height
+  try {
+    const saved = localStorage.getItem('bb-diff-panel-h');
+    if (saved) panel.style.height = Math.max(120, Math.min(window.innerHeight - 60, +saved)) + 'px';
+  } catch {}
 })();
 
 // ── Commit table ──────────────────────────────────────────────────────────────
@@ -1561,12 +1750,7 @@ async function _fetchAndShowDiffs(left8, right8) {
     const lp = data.left_profiles || [];
     const rp = data.right_profiles || [];
     if (diffs.length > 0 || lp.length > 0 || rp.length > 0) {
-      _diffLeft = left8; _diffRight = right8;
-      const panel = document.getElementById('diff-panel');
-      document.getElementById('diff-panel-title').textContent = `${left8.slice(0,8)} → ${right8.slice(0,8)}`;
-      _renderDiffPanel(left8, right8, diffs, lp, rp);
-      panel.classList.add('visible');
-      panel.classList.add('visible');
+      _showDiffResults(left8, right8, diffs, lp, rp);
     }
   } catch {}
 }

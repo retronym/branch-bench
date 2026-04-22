@@ -636,19 +636,34 @@ body{{background:#0d1117;color:#e6edf3;font-family:system-ui,sans-serif;height:1
 .tab{{background:none;border:1px solid #30363d;color:#8b949e;border-radius:4px;padding:0.2rem 0.55rem;cursor:pointer;font-size:0.75rem;font-family:monospace}}
 .tab:hover{{color:#e6edf3}}.tab.active{{color:#e6edf3;background:#21262d;border-color:#388bfd88}}
 .ext{{font-size:0.65rem;color:#484f58;text-decoration:none;margin-right:0.35rem}}.ext:hover{{color:#58a6ff}}
+.kbd{{font-size:0.72rem;color:#484f58;font-family:monospace;margin-left:auto;padding:0.15rem 0.45rem;border:1px solid #30363d;border-radius:3px;cursor:default}}.kbd:hover{{color:#c9d1d9;border-color:#8b949e}}
 #body{{flex:1;position:relative;min-height:0}}
 iframe{{position:absolute;inset:0;width:100%;height:100%;border:none;transition:opacity 0.1s}}
 iframe.hidden{{opacity:0;pointer-events:none}}
 </style></head>
 <body>
-<div id="hdr">{tabs_html}</div>
+<div id="hdr">{tabs_html}<span class="kbd" title="Keyboard: 1–4 select tab, [ ] previous/next">⌨ 1–4  [ ]</span></div>
 <div id="body">{frames_html}</div>
 <script>
-document.getElementById('hdr').addEventListener('click',function(e){{
-  const btn=e.target.closest('.tab');if(!btn)return;
+const _tabs=()=>Array.from(document.querySelectorAll('.tab'));
+function _activateTab(btn){{
   const v=btn.dataset.view;
-  document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b.dataset.view===v));
+  _tabs().forEach(b=>b.classList.toggle('active',b.dataset.view===v));
   document.querySelectorAll('#body iframe').forEach(f=>f.classList.toggle('hidden',f.dataset.view!==v));
+}}
+document.getElementById('hdr').addEventListener('click',function(e){{
+  const btn=e.target.closest('.tab');if(btn)_activateTab(btn);
+}});
+document.addEventListener('keydown',function(e){{
+  if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA')return;
+  const tabs=_tabs();
+  const cur=tabs.findIndex(t=>t.classList.contains('active'));
+  const n=parseInt(e.key);
+  let t=null;
+  if(n>=1&&n<=9)t=tabs[n-1];
+  else if(e.key==='[')t=tabs[(cur-1+tabs.length)%tabs.length];
+  else if(e.key===']')t=tabs[(cur+1)%tabs.length];
+  if(t){{_activateTab(t);e.preventDefault();}}
 }});
 </script>
 </body></html>"""
