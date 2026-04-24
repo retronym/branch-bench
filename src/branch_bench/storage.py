@@ -583,10 +583,10 @@ class Store:
                 curr = by_sha[curr]["parent_sha"]
             chain = list(reversed(chain))
 
-        # Heuristic: the chain is valid if it covers all commits that have runs in this epoch.
-        # If it doesn't, it means parent_sha is missing or head is wrong — fall back to legacy.
-        chain_shas = {c["sha"] for c in chain}
-        if head_sha and run_shas.issubset(chain_shas):
+        # If we built a non-empty chain from the recorded epoch head, it is authoritative.
+        # Stale pre-rebase/squash commits may still have runs in this epoch but should not
+        # appear — the chain reflects the current git history.
+        if head_sha and chain:
             return chain
 
         # LEGACY FALLBACK: position-based ordering
