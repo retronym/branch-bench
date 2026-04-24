@@ -134,7 +134,8 @@ def generate(store: Store, output_path: Path, github_url: str | None = None, nex
                             "raw": sm["raw_data"],
                         }
                     bd["points"].append({
-                        "x": f"{commit['message'][:40]}",
+                        "x": commit["sha"],
+                        "label": commit["message"][:40],
                         "y": r["score"],
                         "error": r["score_error"] if r["score_error"] is not None else 0,
                         "raw": r["raw_data"],
