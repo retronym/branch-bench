@@ -37,6 +37,7 @@ COMMITS = [
     ("ff0011223333", "ff00112", "Remove redundant allocations", "Carol <carol@example.com>"),
     ("001122334444", "0011223", "Upgrade jackson to 2.17", "Alice <alice@example.com>"),
     ("112233445555", "1122334", "Inline hot loop in query path", "Bob <bob@example.com>"),
+    ("223344556666", "2233445", "Remove redundant allocations", "Carol <carol@example.com>"),
 ]
 
 BASELINES = {

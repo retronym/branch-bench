@@ -650,7 +650,8 @@ document.querySelectorAll('.mode-btn').forEach(b =>
 
 const palette = ['#388bfd','#3fb950','#d29922','#f85149','#bc8cff','#39d353'];
 const secColor = '#f0883e';
-const categoryArray = commits.map(c => c.message.substring(0, 40));
+const categoryArray  = commits.map(c => c.sha);
+const categoryLabels = commits.map(c => c.message.substring(0, 40));
 const layout = (unit, mode_label, secUnit) => {
   const hasSecondary = !!secUnit;
   return {
@@ -658,7 +659,8 @@ const layout = (unit, mode_label, secUnit) => {
     font: { color: '#e6edf3', size: 11 },
     margin: { t: 10, r: hasSecondary ? 80 : 20, b: 220, l: 70 },
     xaxis: { tickangle: -55, gridcolor: '#21262d', color: '#8b949e', automargin: true,
-              categoryorder: 'array', categoryarray: categoryArray },
+              categoryorder: 'array', categoryarray: categoryArray,
+              tickmode: 'array', tickvals: categoryArray, ticktext: categoryLabels },
     yaxis: { title: unit + ' (' + mode_label + ')', gridcolor: '#21262d', color: '#8b949e', rangemode: 'tozero' },
     ...(hasSecondary ? {
       yaxis2: {
@@ -732,7 +734,7 @@ function buildTraces(bd, errMode, rMode, secMetric) {
   groups.forEach(({ label, pts }, gi) => {
     const color = palette[gi % palette.length];
     const hoverTmpl =
-      '<b>%{customdata[1]}</b> %{x}<br>%{y:.4f} ' + bd.unit + '<br>' +
+      '<b>%{customdata[1]}</b> %{customdata[2]}<br>%{y:.4f} ' + bd.unit + '<br>' +
       '%{customdata[0]}<br>' +
       '<i style="font-size:0.75em;color:#8b949e">click to copy SHA</i>' +
       '<extra>' + label + '</extra>';
@@ -740,20 +742,21 @@ function buildTraces(bd, errMode, rMode, secMetric) {
     const hasRaw = pts.some(p => p.raw && p.raw.length > 0);
 
     if (errMode === 'raw' && hasRaw) {
-      const bx = [], by = [];
+      const bx = [], by = [], blabels = [];
       for (const pt of pts) {
-        if (pt.raw) { for (const v of pt.raw) { bx.push(pt.x); by.push(v); } }
-        else { bx.push(pt.x); by.push(pt.y); }
+        if (pt.raw) { for (const v of pt.raw) { bx.push(pt.x); by.push(v); blabels.push(pt.label); } }
+        else { bx.push(pt.x); by.push(pt.y); blabels.push(pt.label); }
       }
       traces.push({
         name: label, x: bx, y: by,
+        customdata: blabels,
         type: 'box',
         marker: { color, size: 5, opacity: 0.8 },
         line: { color },
         fillcolor: color + '22',
         boxpoints: 'all', jitter: 0.4, pointpos: 0,
         boxmean: true, whiskerwidth: 0.6,
-        hovertemplate: '%{x}<br>%{y:.4f} ' + bd.unit + '<extra>' + label + '</extra>',
+        hovertemplate: '%{customdata}<br>%{y:.4f} ' + bd.unit + '<extra>' + label + '</extra>',
       });
       return;
     }
@@ -783,7 +786,7 @@ function buildTraces(bd, errMode, rMode, secMetric) {
       name: label,
       x: pts.map(p => p.x), y: yVals,
       error_y,
-      customdata: pts.map(p => [p.run_at, p.short_sha]),
+      customdata: pts.map(p => [p.run_at, p.short_sha, p.label]),
       type: 'scatter', mode: 'lines+markers',
       marker: { color, size: 7 },
       line: { color, dash: gi === 0 ? 'solid' : 'dot' },
