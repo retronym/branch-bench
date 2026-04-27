@@ -4,6 +4,7 @@ import json
 import shutil
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Callable
 
@@ -448,6 +449,7 @@ def run_branch(
     skip_existing: bool = True,
     live_report: bool = True,
     verbose: int = 0,
+    use_worktree: bool = True,
     log: Callable[[str], None] = lambda s: print(s, file=sys.stderr),
 ) -> None:
     """Walk commits on a branch, run tests/benchmarks/profiling, store results.
@@ -461,9 +463,14 @@ def run_branch(
     cfg.base_dir().mkdir(parents=True, exist_ok=True)
     github_url = git.github_remote_url(repo_path, cfg.repo.branch)
 
-    if git.is_dirty(repo_path):
-        log("[!] Working tree is dirty — stash or commit changes before running.")
-        return
+    worktree_path: Path | None = None
+    if use_worktree:
+        worktree_id = uuid.uuid4().hex[:12]
+        worktree_path = (cfg.base_dir() / "worktrees" / worktree_id).resolve()
+    else:
+        if git.is_dirty(repo_path):
+            log("[!] Working tree is dirty — stash or commit changes before running.")
+            return
 
     original_ref = git.current_ref(repo_path)
     log(f"Current ref: {original_ref}")
@@ -581,6 +588,12 @@ def run_branch(
 
     indices = bisect_order(len(run_commits)) if strategy == "bisect" else list(range(len(run_commits)))
 
+    if worktree_path is not None and run_commits:
+        initial_sha = run_commits[indices[0]].sha if indices else run_commits[0].sha
+        log(f"Creating worktree at {worktree_path} ...")
+        git.add_worktree(repo_path, worktree_path, initial_sha)
+    bench_path = worktree_path if worktree_path is not None else repo_path
+
     runs_done: int = 0
     run_time_total: float = 0.0
 
@@ -625,7 +638,7 @@ def run_branch(
                 commit=commit,
                 cfg=cfg,
                 store=store,
-                repo_path=repo_path,
+                repo_path=bench_path,
                 run_tests=run_tests,
                 run_benchmarks=run_benchmarks,
                 run_profile_cmd=run_profile_cmd,
@@ -644,7 +657,7 @@ def run_branch(
                     diff_vs=resolved_diff_vs,
                     cfg=cfg,
                     store=store,
-                    repo_path=repo_path,
+                    repo_path=bench_path,
                     epoch=epoch,
                     log=log,
                 )
@@ -663,8 +676,12 @@ def run_branch(
     except KeyboardInterrupt:
         log("\n[!] Interrupted.")
     finally:
-        log(f"Restoring {original_ref}...")
-        git.restore(repo_path, original_ref)
+        if worktree_path is not None:
+            log(f"Removing worktree {worktree_path} ...")
+            git.remove_worktree(repo_path, worktree_path)
+        else:
+            log(f"Restoring {original_ref}...")
+            git.restore(repo_path, original_ref)
         if running_log:
             running_log.close()
             running_log._path.unlink(missing_ok=True)

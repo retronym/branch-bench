@@ -122,6 +122,10 @@ def init() -> None:
         "Example: --diff-vs previous --diff-vs abc1234"
     ),
 )
+@click.option(
+    "--no-worktree", "no_worktree", is_flag=True, default=False,
+    help="Check out commits in the main repo instead of an isolated git worktree.",
+)
 def run(
     config: str,
     commits: int | None,
@@ -140,6 +144,7 @@ def run(
     verbose: int,
     run_diff: bool,
     diff_vs: tuple[str, ...],
+    no_worktree: bool,
 ) -> None:
     """Walk commits on a branch, run tests and benchmarks, store results."""
     config_path = Path(config)
@@ -171,6 +176,7 @@ def run(
             skip_existing=not run_all,
             live_report=not no_live_report,
             verbose=verbose,
+            use_worktree=not no_worktree,
             log=lambda s: click.echo(s),
         )
     finally:

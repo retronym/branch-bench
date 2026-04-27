@@ -156,6 +156,28 @@ def checkout(repo: Path, sha: str) -> None:
     subprocess.run(["git", "checkout", "--quiet", sha], cwd=repo, check=True)
 
 
+def add_worktree(repo: Path, worktree_path: Path, commit_sha: str) -> None:
+    """Create a detached worktree at worktree_path checked out at commit_sha."""
+    worktree_path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "worktree", "add", "--detach", str(worktree_path), commit_sha],
+        cwd=repo, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "submodule", "update", "--init", "--recursive"],
+        cwd=worktree_path, capture_output=True,
+    )
+
+
+def remove_worktree(repo: Path, worktree_path: Path) -> None:
+    """Remove a git worktree and prune stale references."""
+    subprocess.run(
+        ["git", "worktree", "remove", "--force", str(worktree_path)],
+        cwd=repo, capture_output=True,
+    )
+    subprocess.run(["git", "worktree", "prune"], cwd=repo, capture_output=True)
+
+
 def restore(repo: Path, ref: str) -> None:
     """Checkout ref, removing any untracked files that would block the checkout."""
     import re as _re
