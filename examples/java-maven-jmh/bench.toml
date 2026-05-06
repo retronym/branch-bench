@@ -1,6 +1,5 @@
 [repo]
 path = "/tmp/branch-bench-sample"
-branch = "perf-improvements"
 
 [commands]
 bench_cmd = "mvn -q package -DskipTests && java -jar target/benchmarks.jar -rf json -rff {out} -prof gc -prof stack"

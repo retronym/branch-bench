@@ -561,6 +561,8 @@ class Store:
         epoch = self.current_epoch()
         head_row = self._conn.execute("SELECT value FROM settings WHERE key=?", (f"epoch_{epoch}_head",)).fetchone()
         head_sha = head_row[0] if head_row else None
+        base_row = self._conn.execute("SELECT value FROM settings WHERE key=?", (f"epoch_{epoch}_base",)).fetchone()
+        base_sha = base_row[0] if base_row else None
 
         # Fetch ALL known commits (any epoch) for the parent map
         all_rows = self._conn.execute(
@@ -580,6 +582,10 @@ class Store:
             curr = head_sha
             while curr and curr in by_sha:
                 chain.append(by_sha[curr])
+                # Stop at the epoch base (the baseline/merge-base commit) — don't walk
+                # further back into commits from other epochs or unrelated history.
+                if base_sha and curr == base_sha:
+                    break
                 curr = by_sha[curr]["parent_sha"]
             chain = list(reversed(chain))
 

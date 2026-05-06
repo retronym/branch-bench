@@ -133,6 +133,29 @@ def rev_parse(repo: Path, ref: str) -> str | None:
     return result.stdout.strip() or None
 
 
+def commit_info(repo: Path, sha: str) -> Commit | None:
+    """Fetch commit metadata for a single SHA. Returns None if not found."""
+    fmt = "%H\x1f%T\x1f%P\x1f%ae\x1f%at\x1f%s"
+    result = subprocess.run(
+        ["git", "log", f"--format={fmt}", "-1", sha],
+        cwd=repo, capture_output=True, text=True,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    line = result.stdout.strip()
+    sha_full, tree_sha, parents, author, ts, message = line.split("\x1f", 5)
+    parent_sha = parents.split()[0] if parents else None
+    return Commit(
+        sha=sha_full,
+        short_sha=sha_full[:8],
+        author=author,
+        timestamp=int(ts),
+        message=message,
+        tree_sha=tree_sha,
+        parent_sha=parent_sha,
+    )
+
+
 def expand_range(repo: Path, range_spec: str) -> list[str]:
     """Return full SHAs for all commits selected by *range_spec*.
 

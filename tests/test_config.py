@@ -11,7 +11,6 @@ def test_load_template():
 
     cfg = load_config(path)
     assert cfg.repo.path == "."
-    assert cfg.repo.branch == "main"
     assert cfg.commands.test_cmd == ""
     assert cfg.commands.bench_cmd == ""
     assert cfg.commands.profile_cmd == ""
@@ -23,7 +22,6 @@ def test_load_custom():
     content = """
 [repo]
 path = "/tmp/myrepo"
-branch = "perf-branch"
 
 [commands]
 test_cmd = "./mill tests.jvm.2_13_16.test"
@@ -38,7 +36,7 @@ dir = "out"
         path = Path(f.name)
 
     cfg = load_config(path)
-    assert cfg.repo.branch == "perf-branch"
+    assert cfg.repo.path == "/tmp/myrepo"
     assert "mill" in cfg.commands.test_cmd
     assert "{out}" in cfg.commands.bench_cmd
     assert "{out_dir}" in cfg.commands.bench_cmd
@@ -47,10 +45,29 @@ dir = "out"
     assert cfg.diff.commands == {}
 
 
+def test_load_legacy_branch_ignored():
+    """Existing bench.toml files with [repo] branch = '...' load without error."""
+    content = """
+[repo]
+path = "."
+branch = "perf-branch"
+
+[commands]
+bench_cmd = "./run.sh"
+"""
+    with tempfile.NamedTemporaryFile(suffix=".toml", mode="w", delete=False) as f:
+        f.write(content)
+        path = Path(f.name)
+
+    cfg = load_config(path)
+    assert cfg.repo.path == "."
+    assert not hasattr(cfg.repo, "branch")
+
+
 def test_load_diff_config():
     content = """
 [repo]
-branch = "main"
+path = "."
 
 [commands]
 bench_cmd = "./run.sh"

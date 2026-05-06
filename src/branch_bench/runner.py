@@ -436,6 +436,8 @@ def run_branch(
     cfg: Config,
     store: Store,
     *,
+    branch: str,
+    baseline_ref: str = "merge-base",
     max_commits: int | None = None,
     from_ref: str | None = None,
     to_ref: str | None = None,
@@ -454,6 +456,9 @@ def run_branch(
 ) -> None:
     """Walk commits on a branch, run tests/benchmarks/profiling, store results.
 
+    *branch* — branch name (inferred from git HEAD by the caller).
+    *baseline_ref* — 'merge-base' (default) or any git ref; that commit is
+                     prepended to the commit list as the baseline data point.
     *run_profile_cmd* — also run profile_cmd (when configured) for each commit.
     *run_diff* — run configured diff tools after each commit (linear strategy only;
                  silently skipped for bisect).
@@ -461,7 +466,7 @@ def run_branch(
     """
     repo_path = Path(cfg.repo.path).resolve()
     cfg.base_dir().mkdir(parents=True, exist_ok=True)
-    github_url = git.github_remote_url(repo_path, cfg.repo.branch)
+    github_url = git.github_remote_url(repo_path, branch)
 
     worktree_path: Path | None = None
     if use_worktree:
@@ -500,10 +505,33 @@ def run_branch(
             if orig != sha and not sha.startswith(orig):
                 log(f"  --sha  resolved: {orig!r} → {sha[:8]}")
 
-    merge_base = git.find_merge_base(repo_path, cfg.repo.branch)
+    merge_base = git.find_merge_base(repo_path, branch)
     if merge_base:
         log(f"Merge base with main/master: {merge_base[:8]} — limiting to branch-only commits")
-    all_commits = git.list_commits(repo_path, cfg.repo.branch, max_count=max_commits, exclude_before=merge_base)
+
+    # Resolve the baseline commit before listing branch commits so we can use it as exclude_before
+    baseline_sha: str | None = None
+    if baseline_ref == "merge-base":
+        baseline_sha = merge_base
+    else:
+        baseline_sha = git.rev_parse(repo_path, baseline_ref)
+        if baseline_sha is None:
+            log(f"[!] --baseline {baseline_ref!r}: not a valid git ref — aborting.")
+            return
+        log(f"  --baseline resolved: {baseline_ref!r} → {baseline_sha[:8]}")
+
+    # When a specific baseline is given, use it as the cut-off so branch_commits only
+    # contains commits *after* the baseline (not the entire history when merge_base is None).
+    exclude_before = baseline_sha if baseline_sha else merge_base
+
+    # Commits on the branch itself (not including the baseline)
+    branch_commits = git.list_commits(repo_path, branch, max_count=max_commits, exclude_before=exclude_before)
+
+    baseline_commit: git.Commit | None = None
+    if baseline_sha:
+        baseline_commit = git.commit_info(repo_path, baseline_sha)
+
+    all_commits = ([baseline_commit] if baseline_commit else []) + branch_commits
 
     def _find(sha: str, lst: list) -> int | None:
         for i, c in enumerate(lst):
@@ -529,7 +557,8 @@ def run_branch(
         log("No commits found.")
         return
 
-    log(f"Found {len(run_range)} commit(s) on branch '{cfg.repo.branch}'")
+    log(f"Found {len(run_range)} commit(s) on branch '{branch}'" +
+        (f" + baseline {baseline_sha[:8]}" if baseline_commit and baseline_commit in run_range else ""))
 
     epoch = store.current_epoch()
     for i, commit in enumerate(all_commits):
@@ -539,17 +568,18 @@ def run_branch(
             message=commit.message,
             author=commit.author,
             timestamp=commit.timestamp,
-            branch=cfg.repo.branch,
+            branch=branch,
             position=i,
             tree_sha=commit.tree_sha,
             parent_sha=commit.parent_sha,
         )
 
-    if all_commits:
-        store.set_epoch_head(epoch, all_commits[-1].sha)
-        # We also store the base commit's parent as the epoch base to know where to stop
-        # when traversing backwards (though stopping when parent_sha is not in DB also works).
-        store.set_epoch_base(epoch, all_commits[0].parent_sha or "")
+    if branch_commits:
+        store.set_epoch_head(epoch, branch_commits[-1].sha)
+        store.set_epoch_base(epoch, branch_commits[0].parent_sha or "")
+    elif baseline_commit:
+        store.set_epoch_head(epoch, baseline_commit.sha)
+        store.set_epoch_base(epoch, baseline_commit.parent_sha or "")
 
     backfilled = store.backfill_by_tree_sha()
     if backfilled:
@@ -659,6 +689,7 @@ def run_branch(
                     store=store,
                     repo_path=bench_path,
                     epoch=epoch,
+                    branch=branch,
                     log=log,
                 )
 
@@ -696,6 +727,7 @@ def _run_inline_diffs(
     store: Store,
     repo_path: Path,
     epoch: int,
+    branch: str,
     log: Callable[[str], None],
 ) -> None:
     """Run diffs after a commit in a linear walk.
@@ -718,7 +750,7 @@ def _run_inline_diffs(
             store=store,
             repo_path=repo_path,
             epoch=epoch,
-            branch=cfg.repo.branch,
+            branch=branch,
             log=log,
         )
 
@@ -737,7 +769,7 @@ def _run_inline_diffs(
             store=store,
             repo_path=repo_path,
             epoch=epoch,
-            branch=cfg.repo.branch,
+            branch=branch,
             log=log,
         )
 
@@ -746,6 +778,7 @@ def profile_branch(
     cfg: Config,
     store: Store,
     *,
+    branch: str,
     max_commits: int | None = None,
     from_ref: str | None = None,
     to_ref: str | None = None,
@@ -764,7 +797,7 @@ def profile_branch(
 
     repo_path = Path(cfg.repo.path).resolve()
     cfg.base_dir().mkdir(parents=True, exist_ok=True)
-    github_url = git.github_remote_url(repo_path, cfg.repo.branch)
+    github_url = git.github_remote_url(repo_path, branch)
 
     if git.is_dirty(repo_path):
         log("[!] Working tree is dirty — stash or commit changes before running.")
@@ -792,10 +825,10 @@ def profile_branch(
             return
         resolved_targets = result
 
-    merge_base = git.find_merge_base(repo_path, cfg.repo.branch)
+    merge_base = git.find_merge_base(repo_path, branch)
     if merge_base:
         log(f"Merge base: {merge_base[:8]}")
-    all_commits = git.list_commits(repo_path, cfg.repo.branch, max_count=max_commits, exclude_before=merge_base)
+    all_commits = git.list_commits(repo_path, branch, max_count=max_commits, exclude_before=merge_base)
 
     def _find(sha: str, lst: list) -> int | None:
         for i, c in enumerate(lst):
@@ -829,7 +862,7 @@ def profile_branch(
             message=commit.message,
             author=commit.author,
             timestamp=commit.timestamp,
-            branch=cfg.repo.branch,
+            branch=branch,
             position=i,
             tree_sha=commit.tree_sha,
             parent_sha=commit.parent_sha,
@@ -839,6 +872,8 @@ def profile_branch(
     if all_commits:
         store.set_epoch_head(epoch, all_commits[-1].sha)
         store.set_epoch_base(epoch, all_commits[0].parent_sha or "")
+
+    run_commits = run_range
     if resolved_targets:
         seen_shas: set[str] = set()
         run_commits = []
@@ -875,6 +910,7 @@ def profile_branch(
                     store=store,
                     repo_path=repo_path,
                     epoch=epoch,
+                    branch=branch,
                     log=log,
                 )
 
@@ -896,6 +932,7 @@ def diff_range(
     diff_vs: tuple[str, ...],
     repo_path: Path,
     epoch: int,
+    branch: str,
     log: Callable[[str], None],
 ) -> None:
     """Run AOT diffs over an ordered list of commits.
@@ -925,7 +962,7 @@ def diff_range(
                 store=store,
                 repo_path=repo_path,
                 epoch=epoch,
-                branch=cfg.repo.branch,
+                branch=branch,
                 log=log,
             )
 
@@ -945,6 +982,6 @@ def diff_range(
                 store=store,
                 repo_path=repo_path,
                 epoch=epoch,
-                branch=cfg.repo.branch,
+                branch=branch,
                 log=log,
             )

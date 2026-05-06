@@ -9,7 +9,6 @@ from pathlib import Path
 @dataclass
 class RepoConfig:
     path: str = "."
-    branch: str = "main"
 
 
 @dataclass
@@ -138,7 +137,9 @@ def load_config(path: Path) -> Config:
     except tomllib.TOMLDecodeError as e:
         raise SystemExit(_toml_error(path, e))
 
-    repo = RepoConfig(**data.get("repo", {}))
+    repo_data = dict(data.get("repo", {}))
+    repo_data.pop("branch", None)  # branch is now inferred from the current git checkout
+    repo = RepoConfig(**repo_data)
     commands = CommandsConfig(**data.get("commands", {}))
     output = OutputConfig(**data.get("output", {}))
     # [diff] keys are arbitrary extension strings, not fixed field names.
@@ -149,7 +150,6 @@ def load_config(path: Path) -> Config:
 TEMPLATE = """\
 [repo]
 path = "."
-branch = "main"
 
 [commands]
 # Shell command run from repo root; exit code determines pass/fail.

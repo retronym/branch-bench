@@ -44,12 +44,12 @@ def _onboard(config_path: Path) -> None:
 Next steps:
 
   1. Open {template_path}
-  2. Set [repo] → branch  to your feature branch name
-  3. Set [commands] → bench_cmd  to your JMH runner command
+  2. Set [commands] → bench_cmd  to your JMH runner command
        Use {{out}} for the JMH results file and {{out_dir}} for profiler output
        Example: ./mill foo.jmh.run -- -rff {{out}} -wi 5 -i 5 -f 1
-  4. Move it:  mv {template_path} {config_path}
-  5. Run:      branch-bench run
+  3. Move it:  mv {template_path} {config_path}
+  4. Check out your feature branch, then run:  branch-bench run
+       (branch is inferred from the current git checkout; override with --branch)
 """)
 
 
@@ -70,6 +70,15 @@ def init() -> None:
 
 @main.command()
 @click.option("--config", default=CONFIG_FILE, help="Path to bench.toml")
+@click.option("--branch", "branch_override", default=None, metavar="BRANCH",
+              help="Branch to benchmark (default: current git checkout)")
+@click.option(
+    "--baseline", "baseline_ref", default="merge-base", metavar="REF", show_default=True,
+    help=(
+        "'merge-base' prepends the merge-base with main/master as the baseline data point. "
+        "Any git ref uses that commit as the baseline instead."
+    ),
+)
 @click.option("--commits", "-n", type=int, default=None, help="Max commits to process")
 @click.option("--from", "--from-sha", "from_ref", default=None, metavar="REF",
               help="Start from this commit (any git ref: SHA, HEAD~N, tag, branch)")
@@ -128,6 +137,8 @@ def init() -> None:
 )
 def run(
     config: str,
+    branch_override: str | None,
+    baseline_ref: str,
     commits: int | None,
     from_ref: str | None,
     to_ref: str | None,
@@ -152,8 +163,10 @@ def run(
         _onboard(config_path)
         raise SystemExit(1)
     cfg = load_config(config_path)
+    repo_path = Path(cfg.repo.path).resolve()
+    branch = branch_override or git.current_ref(repo_path)
     store = Store(cfg.db_path(), epoch_override=epoch_override)
-    click.echo(f"branch-bench run  epoch={store.current_epoch()}  branch={cfg.repo.branch}")
+    click.echo(f"branch-bench run  epoch={store.current_epoch()}  branch={branch}")
 
     if run_diff and strategy != "linear":
         click.echo("Note: --diff is only effective with --strategy linear; ignoring.")
@@ -163,6 +176,8 @@ def run(
         run_branch(
             cfg=cfg,
             store=store,
+            branch=branch,
+            baseline_ref=baseline_ref,
             max_commits=commits,
             from_ref=from_ref,
             to_ref=to_ref,
@@ -183,11 +198,13 @@ def run(
         store.close()
 
     if auto_report or open_browser:
-        _do_report(cfg, epoch_override, open_browser=open_browser)
+        _do_report(cfg, epoch_override, branch=branch, baseline_ref=baseline_ref, open_browser=open_browser)
 
 
 @main.command(name="profile")
 @click.option("--config", default=CONFIG_FILE, help="Path to bench.toml")
+@click.option("--branch", "branch_override", default=None, metavar="BRANCH",
+              help="Branch to profile (default: current git checkout)")
 @click.option("--commits", "-n", type=int, default=None, help="Max commits to process")
 @click.option("--from", "--from-sha", "from_ref", default=None, metavar="REF")
 @click.option("--to", "--to-sha", "to_ref", default=None, metavar="REF")
@@ -211,6 +228,7 @@ def run(
 )
 def profile_cmd(
     config: str,
+    branch_override: str | None,
     commits: int | None,
     from_ref: str | None,
     to_ref: str | None,
@@ -231,11 +249,14 @@ def profile_cmd(
     cfg = load_config(Path(config))
     if not cfg.commands.profile_cmd:
         raise click.ClickException("profile_cmd is not set in [commands].")
+    repo_path = Path(cfg.repo.path).resolve()
+    branch = branch_override or git.current_ref(repo_path)
     store = Store(cfg.db_path(), epoch_override=epoch_override)
     try:
         profile_branch(
             cfg=cfg,
             store=store,
+            branch=branch,
             max_commits=commits,
             from_ref=from_ref,
             to_ref=to_ref,
@@ -254,6 +275,8 @@ def profile_cmd(
 @main.command(name="diff")
 @click.argument("refs", nargs=-1, required=True)
 @click.option("--config", default=CONFIG_FILE, help="Path to bench.toml")
+@click.option("--branch", "branch_override", default=None, metavar="BRANCH",
+              help="Branch to diff (default: current git checkout)")
 @click.option(
     "--diff-vs",
     "diff_vs",
@@ -270,6 +293,7 @@ def profile_cmd(
 def diff_cmd(
     refs: tuple[str, ...],
     config: str,
+    branch_override: str | None,
     diff_vs: tuple[str, ...],
     epoch_override: int | None,
 ) -> None:
@@ -291,24 +315,27 @@ def diff_cmd(
         raise click.ClickException("No [diff] commands configured in bench.toml.")
 
     repo_path = Path(cfg.repo.path).resolve()
+    branch = branch_override or git.current_ref(repo_path)
     store = Store(cfg.db_path(), epoch_override=epoch_override)
     log = click.echo
 
     try:
         epoch = store.current_epoch()
-        merge_base = git.find_merge_base(repo_path, cfg.repo.branch)
-        all_commits = git.list_commits(repo_path, cfg.repo.branch, exclude_before=merge_base)
+        merge_base = git.find_merge_base(repo_path, branch)
+        all_commits = git.list_commits(repo_path, branch, exclude_before=merge_base)
 
         def _find_commit(sha_prefix: str) -> "git.Commit | None":
             for c in all_commits:
                 if c.sha == sha_prefix or c.sha.startswith(sha_prefix) or c.short_sha.startswith(sha_prefix):
                     return c
-            # Also try rev_parse for refs not on branch (e.g. the merge-base itself)
+            # Fall back to rev_parse for refs not on branch (e.g. the merge-base itself)
             full = git.rev_parse(repo_path, sha_prefix)
             if full:
                 for c in all_commits:
                     if c.sha == full:
                         return c
+                # Commit exists in repo but not in the branch range — load it directly
+                return git.commit_info(repo_path, full)
             return None
 
         # ── Two-SHA form ─────────────────────────────────────────────────────
@@ -332,7 +359,7 @@ def diff_cmd(
                 store=store,
                 repo_path=repo_path,
                 epoch=epoch,
-                branch=cfg.repo.branch,
+                branch=branch,
                 log=log,
             )
             return
@@ -367,6 +394,7 @@ def diff_cmd(
             diff_vs=diff_vs,
             repo_path=repo_path,
             epoch=epoch,
+            branch=branch,
             log=log,
         )
     finally:
@@ -375,40 +403,80 @@ def diff_cmd(
 
 @main.command()
 @click.option("--config", default=CONFIG_FILE, help="Path to bench.toml")
+@click.option("--branch", "branch_override", default=None, metavar="BRANCH",
+              help="Branch to report on (default: current git checkout)")
+@click.option(
+    "--baseline", "baseline_ref", default="merge-base", metavar="REF", show_default=True,
+    help=(
+        "'merge-base' prepends the merge-base with main/master as the baseline data point. "
+        "Any git ref uses that commit as the baseline instead."
+    ),
+)
 @click.option("--epoch", "epoch_override", type=int, default=None, help="Generate report for a specific epoch")
 @click.option("--open", "open_browser", is_flag=True, default=False, help="Open the report in your browser when done")
-def report(config: str, epoch_override: int | None, open_browser: bool) -> None:
+def report(
+    config: str,
+    branch_override: str | None,
+    baseline_ref: str,
+    epoch_override: int | None,
+    open_browser: bool,
+) -> None:
     """Generate an HTML report from stored results."""
     cfg = load_config(Path(config))
-    _do_report(cfg, epoch_override, open_browser=open_browser)
-
-
-def _do_report(cfg, epoch_override: int | None = None, open_browser: bool = False) -> None:
     repo_path = Path(cfg.repo.path).resolve()
+    branch = branch_override or git.current_ref(repo_path)
+    _do_report(cfg, epoch_override, branch=branch, baseline_ref=baseline_ref, open_browser=open_browser)
+
+
+def _do_report(
+    cfg,
+    epoch_override: int | None = None,
+    branch: str = "",
+    baseline_ref: str = "merge-base",
+    open_browser: bool = False,
+) -> None:
+    repo_path = Path(cfg.repo.path).resolve()
+    if not branch:
+        branch = git.current_ref(repo_path)
     store = Store(cfg.db_path(), epoch_override=epoch_override)
     try:
         epoch = store.current_epoch()
         if epoch_override is None:
             # Sync with current git workspace only if regenerating current epoch
             try:
-                merge_base = git.find_merge_base(repo_path, cfg.repo.branch)
-                commits = git.list_commits(repo_path, cfg.repo.branch, exclude_before=merge_base)
-                for c in commits:
+                merge_base = git.find_merge_base(repo_path, branch)
+
+                # Resolve baseline first so we can use it as exclude_before
+                if baseline_ref == "merge-base":
+                    baseline_sha: str | None = merge_base
+                else:
+                    baseline_sha = git.rev_parse(repo_path, baseline_ref)
+
+                exclude_before = baseline_sha if baseline_sha else merge_base
+                branch_commits = git.list_commits(repo_path, branch, exclude_before=exclude_before)
+
+                baseline_commit = git.commit_info(repo_path, baseline_sha) if baseline_sha else None
+                all_commits = ([baseline_commit] if baseline_commit else []) + branch_commits
+
+                for c in all_commits:
                     store.save_commit(
                         sha=c.sha, short_sha=c.short_sha, message=c.message,
-                        author=c.author, timestamp=c.timestamp, branch=cfg.repo.branch,
+                        author=c.author, timestamp=c.timestamp, branch=branch,
                         parent_sha=c.parent_sha, tree_sha=c.tree_sha
                     )
-                if commits:
-                    store.set_epoch_head(epoch, commits[-1].sha)
-                    store.set_epoch_base(epoch, commits[0].parent_sha or "")
+                if branch_commits:
+                    store.set_epoch_head(epoch, branch_commits[-1].sha)
+                    store.set_epoch_base(epoch, branch_commits[0].parent_sha or "")
+                elif baseline_commit:
+                    store.set_epoch_head(epoch, baseline_commit.sha)
+                    store.set_epoch_base(epoch, baseline_commit.parent_sha or "")
             except Exception as e:
                 click.echo(f"  [!] Git sync failed (skipping): {e}")
 
         backfilled = store.backfill_by_tree_sha()
         if backfilled:
             click.echo(f"  Backfilled {backfilled} commit(s) via tree-SHA reuse")
-        github_url = git.github_remote_url(repo_path, cfg.repo.branch)
+        github_url = git.github_remote_url(repo_path, branch)
         out = cfg.report_path(epoch)
         generate(store, out, github_url=github_url)
         generate_index(cfg)
@@ -553,7 +621,7 @@ def migrate(config: str, from_db: str | None) -> None:
             click.echo(f"  Backfilled {parents} parent SHA(s) and {heads} epoch head(s) from git/metadata.")
 
         # Regenerate reports for all epochs
-        github_url = git.github_remote_url(Path(cfg.repo.path).resolve(), cfg.repo.branch)
+        github_url = git.github_remote_url(repo_path, git.current_ref(repo_path))
         for ep in store.all_epochs():
             ep_store = Store(cfg.db_path(), epoch_override=ep)
             try:
@@ -571,9 +639,11 @@ def migrate(config: str, from_db: str | None) -> None:
 
 @main.command()
 @click.option("--config", default=CONFIG_FILE, help="Path to bench.toml")
+@click.option("--branch", "branch_override", default=None, metavar="BRANCH",
+              help="Branch to serve (default: current git checkout)")
 @click.option("--port", default=7823, show_default=True, help="Port to listen on")
 @click.option("--epoch", "epoch_override", type=int, default=None, help="Serve a specific epoch")
-def serve(config: str, port: int, epoch_override: int | None) -> None:
+def serve(config: str, branch_override: str | None, port: int, epoch_override: int | None) -> None:
     """Serve the report with an HTTP API for on-demand flamegraph diffing.
 
     Unlike the static report, the server can run diff tools on request when
@@ -581,6 +651,8 @@ def serve(config: str, port: int, epoch_override: int | None) -> None:
     `branch-bench diff` or `--diff`) are always available statically.
     """
     cfg = load_config(Path(config))
+    repo_path = Path(cfg.repo.path).resolve()
+    branch = branch_override or git.current_ref(repo_path)
     store = Store(cfg.db_path(), epoch_override=epoch_override)
     try:
         epoch = store.current_epoch()
@@ -595,10 +667,10 @@ def serve(config: str, port: int, epoch_override: int | None) -> None:
             f"{report_html} not found. Run `branch-bench report` first."
         )
 
-    _run_server(cfg, epoch, epoch_dir, report_html, port)
+    _run_server(cfg, epoch, epoch_dir, report_html, port, branch=branch)
 
 
-def _run_server(cfg, epoch: int, epoch_dir: Path, report_html: Path, port: int) -> None:
+def _run_server(cfg, epoch: int, epoch_dir: Path, report_html: Path, port: int, branch: str = "") -> None:
     """Start a stdlib-based HTTP server with diff API."""
     import html as _html
     import http.server
@@ -618,6 +690,8 @@ def _run_server(cfg, epoch: int, epoch_dir: Path, report_html: Path, port: int) 
     )
 
     repo_path = Path(cfg.repo.path).resolve()
+    if not branch:
+        branch = git.current_ref(repo_path)
     epoch_dir_resolved = epoch_dir.resolve()
     _DISPLAYABLE = {".svg", ".html", ".htm", ".txt"}
 
@@ -746,11 +820,18 @@ document.querySelectorAll('iframe').forEach(function(f) {{
                 store = _Store(cfg.db_path(), epoch_override=epoch)
                 try:
                     all_commits = git.list_commits(
-                        repo_path, cfg.repo.branch,
-                        exclude_before=git.find_merge_base(repo_path, cfg.repo.branch),
+                        repo_path, branch,
+                        exclude_before=git.find_merge_base(repo_path, branch),
                     )
-                    left_commit = next((c for c in all_commits if c.sha.startswith(left_prefix)), None)
-                    right_commit = next((c for c in all_commits if c.sha.startswith(right_prefix)), None)
+                    def _resolve(prefix: str):
+                        c = next((c for c in all_commits if c.sha.startswith(prefix)), None)
+                        if c:
+                            return c
+                        full = git.rev_parse(repo_path, prefix)
+                        return git.commit_info(repo_path, full) if full else None
+
+                    left_commit = _resolve(left_prefix)
+                    right_commit = _resolve(right_prefix)
                     if not left_commit or not right_commit:
                         self._send(404, "application/json", json.dumps({"error": "commit not found"}).encode())
                         return
@@ -822,8 +903,8 @@ document.querySelectorAll('iframe').forEach(function(f) {{
             try:
                 # Find commits
                 all_commits = git.list_commits(
-                    repo_path, cfg.repo.branch,
-                    exclude_before=git.find_merge_base(repo_path, cfg.repo.branch),
+                    repo_path, branch,
+                    exclude_before=git.find_merge_base(repo_path, branch),
                 )
                 left_commit = next((c for c in all_commits if c.sha == left_sha or c.sha.startswith(left_sha)), None)
                 right_commit = next((c for c in all_commits if c.sha == right_sha or c.sha.startswith(right_sha)), None)
@@ -843,7 +924,7 @@ document.querySelectorAll('iframe').forEach(function(f) {{
                     store=store,
                     repo_path=repo_path,
                     epoch=epoch,
-                    branch=cfg.repo.branch,
+                    branch=branch,
                     log=messages.append,
                     force=True,
                 )
