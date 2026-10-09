@@ -1774,14 +1774,17 @@ for (const c of commits) {
     const old = document.getElementById('__rl');
     if (old) old.remove();
     window.__runLog = [];
+    window.__runLogAbsent = false;
     const s = document.createElement('script');
     s.id = '__rl';
     s.src = 'running.js?' + Date.now();
-    s.onload = () => { missCount = 0; render(); };
-    s.onerror = () => {
+    const miss = () => {
       panel.style.display = 'none';
       if (++missCount >= 3) stopPolling();
     };
+    // `serve` answers a missing running.js with a stub setting __runLogAbsent instead of a 404
+    s.onload = () => { if (window.__runLogAbsent) miss(); else { missCount = 0; render(); } };
+    s.onerror = miss;
     document.head.appendChild(s);
   }
 
@@ -1815,9 +1818,10 @@ if (serverMode) (function () {
     try {
       const r = await fetch('/api/report-mtime');
       if (!r.ok) return;
-      const { mtime } = await r.json();
-      if (knownMtime === null) { knownMtime = mtime; return; }
-      if (mtime !== knownMtime) {
+      const { mtime, epoch } = await r.json();
+      const key = `${epoch}:${mtime}`;   // epoch changes (serve follows the current epoch) count as stale too
+      if (knownMtime === null) { knownMtime = key; return; }
+      if (key !== knownMtime) {
         document.getElementById('report-stale').classList.add('show');
         stopStale();
       }

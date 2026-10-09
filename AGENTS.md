@@ -14,7 +14,10 @@ This file exists to give future AI assistants (or the original author) a fast, a
 
 ```
 src/branch_bench/
-├── cli.py           Click entry point. Commands: init, run, report, show, epoch, status, migrate.
+├── cli.py           Click entry point. Commands: init, run, profile, diff, report, show, serve,
+│                    epoch, status, migrate. `serve` (_make_server) re-resolves the epoch and
+│                    re-reads the report on every request unless --epoch pins it, and answers a
+│                    missing running.js with a stub (window.__runLogAbsent) instead of a 404.
 │                    _do_report() shared helper used by both `run --report` and the `report` command.
 ├── config.py        bench.toml loading via tomllib. TEMPLATE string for init.
 │                    OutputConfig has only `dir` (default ".bench"). Handles TOML parse errors
