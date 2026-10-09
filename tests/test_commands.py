@@ -120,3 +120,30 @@ def test_run_diff_tool_raises_on_failure():
                 right_file=Path(cwd) / "r.svg", right_sha="bbb", right_commit_msg="", right_branch="feat",
                 out_dir=Path(out_d), cwd=Path(cwd),
             )
+
+
+def test_run_diff_tool_passes_absolute_paths_when_cwd_differs(tmp_path, monkeypatch):
+    # Mirrors `run --diff` with a worktree: paths are relative to the process cwd
+    # (repo root) but the tool runs inside the commit's checkout.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "left.jfr").write_text("L")
+    (tmp_path / "right.jfr").write_text("R")
+    checkout = tmp_path / ".bench" / "worktrees" / "abc"
+    checkout.mkdir(parents=True)
+
+    files, _ = run_diff_tool(
+        'cat "$LEFT_FILE" "$RIGHT_FILE" > "$OUT_DIR/diff.txt"',
+        left_file=Path("left.jfr"),
+        left_sha="a" * 40,
+        left_commit_msg="left",
+        left_branch="main",
+        right_file=Path("right.jfr"),
+        right_sha="b" * 40,
+        right_commit_msg="right",
+        right_branch="main",
+        out_dir=Path(".bench/epoch-1/assets/diffs/a-b/cpu"),
+        cwd=checkout,
+    )
+    assert [f.name for f in files] == ["diff.txt"]
+    assert files[0].read_text() == "LR"
+    assert files[0].resolve() == (tmp_path / ".bench/epoch-1/assets/diffs/a-b/cpu/diff.txt").resolve()

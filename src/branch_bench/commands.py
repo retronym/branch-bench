@@ -169,10 +169,16 @@ def run_diff_tool(
       LEFT_FILE, LEFT_SHA, LEFT_COMMIT_MSG, LEFT_BRANCH
       RIGHT_FILE, RIGHT_SHA, RIGHT_COMMIT_MSG, RIGHT_BRANCH
       OUT_DIR
+    All paths are passed as absolute paths, independent of *cwd*.
 
     The tool may write 0-N files of any name/extension to OUT_DIR.
     Returns (output_files, raw_output).  Raises RuntimeError on non-zero exit.
     """
+    # The tool runs with cwd = the commit's checkout (often a worktree under .bench/),
+    # so a relative OUT_DIR would resolve somewhere else for it.
+    out_dir = out_dir.resolve()
+    left_file = left_file.resolve()
+    right_file = right_file.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     env = {
         **os.environ,
