@@ -327,6 +327,7 @@ test_runs           -- id, run_id, passed, tests_run, tests_failed, duration_sec
 benchmark_results   -- id, run_id, benchmark, mode, score, score_error, unit, params, raw_data
 secondary_metrics   -- id, run_id, benchmark, metric, score, score_error, unit, raw_data  (e.g. gc.alloc.rate.norm from -prof gc)
 profiles            -- id, run_id, event, file_path
+diffs               -- id, epoch, left_sha, right_sha, diff_vs, source_ext, diff_path, left_profile_id, right_profile_id
 settings            -- key/value store (tracks current epoch)
 ```
 

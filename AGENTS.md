@@ -146,7 +146,11 @@ benchmark_results   (id PK, run_id FK, benchmark, mode, score, score_error, unit
 secondary_metrics   (id PK, run_id FK, benchmark, metric, score NOT NULL,
                      score_error, unit, raw_data)
 profiles            (id PK, run_id FK, event, file_path)
+diffs               (id PK, epoch, left_sha, right_sha, diff_vs, source_ext, diff_path,
+                     created_at, left_profile_id, right_profile_id)
 ```
+
+Diffs are cached per *profile pair* (`left_profile_id`, `right_profile_id`), not per commit pair: re-profiling either commit (`profile --all`) makes `diff_pair` prune the superseded rows and compute a fresh diff.
 
 `epoch` on both `commits` and `runs` scopes all normal queries. Always filter by `current_epoch()` in new queries. `position` on `commits` is the display order in the report (oldest = 0). `tree_sha` on `commits` is the git tree object SHA (content hash, survives metadata rewrites).
 
