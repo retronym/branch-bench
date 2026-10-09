@@ -286,23 +286,35 @@ def diff_pair(
         ext = Path(p["file_path"]).suffix.lstrip(".")
         right_by_ext.setdefault(ext, []).append(p)
 
-    ran = 0
+    # (left, right) profile pairs to diff, grouped by extension
+    pairs_by_ext: dict[str, list[tuple[dict, dict]]] = {}
     for left_p in left_profiles:
-        left_file = Path(left_p["file_path"])
-        ext = left_file.suffix.lstrip(".")
-        diff_cmd = cfg.diff.commands.get(ext)
-        if not diff_cmd or ext not in right_by_ext:
-            continue
+        ext = Path(left_p["file_path"]).suffix.lstrip(".")
+        if ext in cfg.diff.commands:
+            for right_p in right_by_ext.get(ext, []):
+                pairs_by_ext.setdefault(ext, []).append((left_p, right_p))
 
-        for right_p in right_by_ext[ext]:
+    if not pairs_by_ext:
+        log(f"  [diff] No matching extensions for {left_short_sha[:8]}…{right_commit.short_sha}")
+        return
+
+    for ext, pairs in pairs_by_ext.items():
+        diff_cmd = cfg.diff.commands[ext]
+        # Drop diffs of superseded profiles (e.g. after `profile --all`); all of them when forced.
+        keep = set() if force else {(lp["id"], rp["id"]) for lp, rp in pairs}
+        store.prune_stale_diffs(epoch, left_sha, right_commit.sha, diff_vs, ext, keep)
+
+        for left_p, right_p in pairs:
+            left_file = Path(left_p["file_path"])
             right_file = Path(right_p["file_path"])
 
-            # Skip if already computed (idempotent re-runs), unless forced
-            if not force and store.diff_exists(epoch, left_sha, right_commit.sha, diff_vs, ext):
+            # Cache is keyed on the exact profiles diffed, so a re-profiled commit gets a fresh diff
+            if store.diff_exists(
+                epoch, left_sha, right_commit.sha, diff_vs, ext,
+                left_profile_id=left_p["id"], right_profile_id=right_p["id"],
+            ):
                 log(f"  [diff] {left_short_sha[:8]}…{right_commit.short_sha} ({ext}) — cached")
                 continue
-            if force:
-                store.delete_diffs_for_pair(epoch, left_sha, right_commit.sha, diff_vs, ext)
 
             artifact_stem = left_file.stem
             out_dir = cfg.diff_assets_dir(
@@ -332,14 +344,12 @@ def diff_pair(
                         diff_vs=diff_vs,
                         source_ext=ext,
                         diff_path=str(rel),
+                        left_profile_id=left_p["id"],
+                        right_profile_id=right_p["id"],
                     )
                     log(f"  [diff] → {f.name}")
-                ran += 1
             except RuntimeError as e:
                 log(f"  [!] Diff failed ({left_short_sha[:8]}…{right_commit.short_sha}): {e.args[0]}")
-
-    if ran == 0 and left_profiles and right_profiles:
-        log(f"  [diff] No matching extensions for {left_short_sha[:8]}…{right_commit.short_sha}")
 
 
 def _resolve_ref(repo_path: Path, ref: str, flag: str, log: Callable[[str], None]) -> str | None:
@@ -684,6 +694,7 @@ def run_branch(
                     commit=commit,
                     idx=idx,
                     run_commits=run_commits,
+                    branch_commits=all_commits,
                     diff_vs=resolved_diff_vs,
                     cfg=cfg,
                     store=store,
@@ -718,10 +729,22 @@ def run_branch(
             running_log._path.unlink(missing_ok=True)
 
 
+def _previous_profiled(commit: Commit, branch_commits: list[Commit], store: Store) -> Commit | None:
+    """The nearest commit before *commit* on the branch that has profiles in the current epoch."""
+    pos = next((i for i, c in enumerate(branch_commits) if c.sha == commit.sha), None)
+    if pos is None:
+        return None
+    for c in reversed(branch_commits[:pos]):
+        if store.best_profiles_for_commit(c.sha):
+            return c
+    return None
+
+
 def _run_inline_diffs(
     commit: Commit,
     idx: int,
     run_commits: list[Commit],
+    branch_commits: list[Commit],
     diff_vs: tuple[str, ...],
     cfg: Config,
     store: Store,
@@ -730,16 +753,20 @@ def _run_inline_diffs(
     branch: str,
     log: Callable[[str], None],
 ) -> None:
-    """Run diffs after a commit in a linear walk.
+    """Run diffs after a commit has been profiled.
 
     *diff_vs* is a tuple of targets:
-      'previous'  — diff vs the preceding commit in the walk
+      'previous'  — diff vs the nearest earlier commit on the branch that has
+                    profiles in this epoch (so `--sha` runs diff against their
+                    real predecessor); falls back to the preceding commit in the walk
       <full SHA>  — diff vs that fixed commit (resolved upstream)
     """
     diff_vs_set = set(diff_vs)
 
-    if "previous" in diff_vs_set and idx > 0:
+    prev = _previous_profiled(commit, branch_commits, store) if "previous" in diff_vs_set else None
+    if prev is None and "previous" in diff_vs_set and idx > 0:
         prev = run_commits[idx - 1]
+    if prev is not None:
         diff_pair(
             left_sha=prev.sha,
             left_short_sha=prev.short_sha,
@@ -905,6 +932,7 @@ def profile_branch(
                     commit=commit,
                     idx=list_idx,
                     run_commits=run_commits,
+                    branch_commits=all_commits,
                     diff_vs=resolved_diff_vs,
                     cfg=cfg,
                     store=store,

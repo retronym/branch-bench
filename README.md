@@ -101,6 +101,7 @@ All commands accept `--config PATH` to point at a `bench.toml` in a non-default 
 | `branch-bench run` | Walk branch commits, test + benchmark + profile |
 | `branch-bench report` | Regenerate the report from stored data |
 | `branch-bench show` | Open the current epoch's report in the default browser |
+| `branch-bench serve` | Serve the report over HTTP with on-demand flamegraph diffing. Follows the current epoch (picks up `branch-bench epoch` / new runs on reload); `--epoch N` pins it |
 | `branch-bench epoch` | Start a new epoch — re-run all commits next time (preserves history) |
 | `branch-bench status` | Print a summary of what has been collected |
 | `branch-bench migrate` | Migrate files from an old layout to the current one |
@@ -122,6 +123,8 @@ All commands accept `--config PATH` to point at a `bench.toml` in a non-default 
 | `--no-live-report` | off | Disable per-commit report regeneration during the run |
 | `-v` / `--verbose` | off | Stream bench command output live as it runs. `-vv` also streams the test command |
 | `--epoch N` | current | Run in a specific past epoch instead of the current one |
+| `--diff` | off | Run `[diff]` tools after each commit (`--strategy linear` only) |
+| `--diff-vs previous\|REF` | `previous` | Diff target, repeatable. `previous` is the nearest earlier commit *on the branch* that has profiles in this epoch, so `--sha` runs diff against their real predecessor. `branch-bench profile --diff` behaves the same |
 
 All ref arguments are resolved to full SHAs via `git rev-parse` before anything runs, so the resolved SHA is what gets stored and shown in the report. The log line confirms each resolution:
 
@@ -327,6 +330,7 @@ test_runs           -- id, run_id, passed, tests_run, tests_failed, duration_sec
 benchmark_results   -- id, run_id, benchmark, mode, score, score_error, unit, params, raw_data
 secondary_metrics   -- id, run_id, benchmark, metric, score, score_error, unit, raw_data  (e.g. gc.alloc.rate.norm from -prof gc)
 profiles            -- id, run_id, event, file_path
+diffs               -- id, epoch, left_sha, right_sha, diff_vs, source_ext, diff_path, left_profile_id, right_profile_id
 settings            -- key/value store (tracks current epoch)
 ```
 

@@ -81,7 +81,9 @@ CREATE TABLE IF NOT EXISTS diffs (
     diff_vs     TEXT NOT NULL,
     source_ext  TEXT NOT NULL,
     diff_path   TEXT NOT NULL,
-    created_at  TEXT NOT NULL
+    created_at  TEXT NOT NULL,
+    left_profile_id  INTEGER,
+    right_profile_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS diffs_right_sha ON diffs (epoch, right_sha);
 CREATE INDEX IF NOT EXISTS diffs_pair      ON diffs (epoch, left_sha, right_sha);
@@ -141,6 +143,9 @@ class Store:
             ("benchmark_results","raw_data",        "TEXT"),
             # 'bench' | 'profile' — distinguishes bench_cmd runs from profile_cmd runs
             ("runs",             "source",          "TEXT NOT NULL DEFAULT 'bench'"),
+            # profiles.id of the two inputs — diffs are cached per profile pair, not per commit pair
+            ("diffs",            "left_profile_id", "INTEGER"),
+            ("diffs",            "right_profile_id","INTEGER"),
         ]
         existing = {
             (row[0], row[1])
@@ -478,13 +483,19 @@ class Store:
         diff_vs: str,
         source_ext: str,
         diff_path: str,
+        left_profile_id: int | None = None,
+        right_profile_id: int | None = None,
     ) -> None:
-        """Store one output file produced by a diff tool invocation."""
+        """Store one output file produced by a diff tool invocation.
+
+        *left_profile_id* / *right_profile_id* identify the profile files that
+        were diffed; they key the cache so re-profiling a commit yields a new diff.
+        """
         now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         self._conn.execute(
-            "INSERT INTO diffs(epoch, left_sha, right_sha, diff_vs, source_ext, diff_path, created_at) "
-            "VALUES(?,?,?,?,?,?,?)",
-            (epoch, left_sha, right_sha, diff_vs, source_ext, diff_path, now),
+            "INSERT INTO diffs(epoch, left_sha, right_sha, diff_vs, source_ext, diff_path, created_at, "
+            "left_profile_id, right_profile_id) VALUES(?,?,?,?,?,?,?,?,?)",
+            (epoch, left_sha, right_sha, diff_vs, source_ext, diff_path, now, left_profile_id, right_profile_id),
         )
         self._conn.commit()
 
@@ -501,14 +512,6 @@ class Store:
             for r in rows
         ]
 
-    def delete_diffs_for_pair(self, epoch: int, left_sha: str, right_sha: str, diff_vs: str, source_ext: str) -> None:
-        """Remove all stored diff rows for this exact combination (used before a forced re-run)."""
-        self._conn.execute(
-            "DELETE FROM diffs WHERE epoch=? AND left_sha=? AND right_sha=? AND diff_vs=? AND source_ext=?",
-            (epoch, left_sha, right_sha, diff_vs, source_ext),
-        )
-        self._conn.commit()
-
     def diffs_for_pair(self, left_sha: str, right_sha: str) -> list[dict]:
         """Return diff records for an exact (left, right) pair in the current epoch."""
         epoch = self.current_epoch()
@@ -522,20 +525,59 @@ class Store:
             for r in rows
         ]
 
-    def diff_exists(self, epoch: int, left_sha: str, right_sha: str, diff_vs: str, source_ext: str) -> bool:
-        """Return True if at least one diff file exists for this combination."""
-        row = self._conn.execute(
-            "SELECT 1 FROM diffs WHERE epoch=? AND left_sha=? AND right_sha=? AND diff_vs=? AND source_ext=? LIMIT 1",
+    def diff_exists(
+        self,
+        epoch: int,
+        left_sha: str,
+        right_sha: str,
+        diff_vs: str,
+        source_ext: str,
+        left_profile_id: int | None = None,
+        right_profile_id: int | None = None,
+    ) -> bool:
+        """Return True if at least one diff file exists for this combination.
+
+        When profile ids are given, only a diff of exactly those two profiles counts.
+        """
+        sql = "SELECT 1 FROM diffs WHERE epoch=? AND left_sha=? AND right_sha=? AND diff_vs=? AND source_ext=?"
+        args: list = [epoch, left_sha, right_sha, diff_vs, source_ext]
+        if left_profile_id is not None:
+            sql += " AND left_profile_id=?"
+            args.append(left_profile_id)
+        if right_profile_id is not None:
+            sql += " AND right_profile_id=?"
+            args.append(right_profile_id)
+        return self._conn.execute(sql + " LIMIT 1", args).fetchone() is not None
+
+    def prune_stale_diffs(
+        self,
+        epoch: int,
+        left_sha: str,
+        right_sha: str,
+        diff_vs: str,
+        source_ext: str,
+        keep: set[tuple[int, int]],
+    ) -> int:
+        """Delete diff rows for this combination whose (left_profile_id, right_profile_id)
+        is not in *keep* — i.e. diffs of profiles that have since been superseded.
+        Returns the number of rows deleted."""
+        rows = self._conn.execute(
+            "SELECT id, left_profile_id, right_profile_id FROM diffs "
+            "WHERE epoch=? AND left_sha=? AND right_sha=? AND diff_vs=? AND source_ext=?",
             (epoch, left_sha, right_sha, diff_vs, source_ext),
-        ).fetchone()
-        return row is not None
+        ).fetchall()
+        stale = [r[0] for r in rows if (r[1], r[2]) not in keep]
+        if stale:
+            self._conn.executemany("DELETE FROM diffs WHERE id=?", [(i,) for i in stale])
+            self._conn.commit()
+        return len(stale)
 
     def best_profiles_for_commit(self, commit_sha: str) -> list[dict]:
         """Return profiles from the most recent profile run; fall back to the most recent bench run."""
         epoch = self.current_epoch()
         for source in ("profile", "bench"):
             run_row = self._conn.execute(
-                "SELECT id FROM runs WHERE commit_sha=? AND epoch=? AND source=? ORDER BY run_at DESC LIMIT 1",
+                "SELECT id FROM runs WHERE commit_sha=? AND epoch=? AND source=? ORDER BY run_at DESC, id DESC LIMIT 1",
                 (commit_sha, epoch, source),
             ).fetchone()
             if run_row:
@@ -651,10 +693,10 @@ class Store:
 
     def profiles_for(self, run_id: int) -> list[dict]:
         rows = self._conn.execute(
-            "SELECT event, file_path FROM profiles WHERE run_id=?",
+            "SELECT id, event, file_path FROM profiles WHERE run_id=?",
             (run_id,),
         ).fetchall()
-        return [{"event": r[0], "file_path": r[1]} for r in rows]
+        return [{"id": r[0], "event": r[1], "file_path": r[2]} for r in rows]
 
     def profiles_for_migration(self, run_id: int) -> list[dict]:
         rows = self._conn.execute(

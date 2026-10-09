@@ -126,7 +126,7 @@ def init() -> None:
     show_default=True,
     help=(
         "What to diff each commit against. Repeatable. "
-        "'previous' = the preceding commit in the linear walk; "
+        "'previous' = the nearest earlier commit on the branch with profiles in this epoch; "
         "any git ref (SHA, tag, branch) = diff vs that fixed commit. "
         "Example: --diff-vs previous --diff-vs abc1234"
     ),
@@ -224,7 +224,10 @@ def run(
     type=str,
     default=("previous",),
     show_default=True,
-    help="What to diff against: 'previous' or a git ref. Repeatable.",
+    help=(
+        "What to diff against. Repeatable. 'previous' = the nearest earlier commit "
+        "on the branch with profiles in this epoch; or any git ref."
+    ),
 )
 def profile_cmd(
     config: str,
@@ -642,7 +645,8 @@ def migrate(config: str, from_db: str | None) -> None:
 @click.option("--branch", "branch_override", default=None, metavar="BRANCH",
               help="Branch to serve (default: current git checkout)")
 @click.option("--port", default=7823, show_default=True, help="Port to listen on")
-@click.option("--epoch", "epoch_override", type=int, default=None, help="Serve a specific epoch")
+@click.option("--epoch", "epoch_override", type=int, default=None,
+              help="Pin to a specific epoch (default: follow the current epoch, re-resolved on each request)")
 def serve(config: str, branch_override: str | None, port: int, epoch_override: int | None) -> None:
     """Serve the report with an HTTP API for on-demand flamegraph diffing.
 
@@ -653,25 +657,51 @@ def serve(config: str, branch_override: str | None, port: int, epoch_override: i
     cfg = load_config(Path(config))
     repo_path = Path(cfg.repo.path).resolve()
     branch = branch_override or git.current_ref(repo_path)
-    store = Store(cfg.db_path(), epoch_override=epoch_override)
-    try:
-        epoch = store.current_epoch()
-    finally:
-        store.close()
 
-    epoch_dir = cfg.epoch_dir(epoch)
-    report_html = cfg.report_path(epoch)
-
-    if not report_html.exists():
+    if epoch_override is not None and not cfg.report_path(epoch_override).exists():
         raise click.ClickException(
-            f"{report_html} not found. Run `branch-bench report` first."
+            f"{cfg.report_path(epoch_override)} not found. Run `branch-bench report --epoch {epoch_override}` first."
         )
 
-    _run_server(cfg, epoch, epoch_dir, report_html, port, branch=branch)
+    server = _make_server(cfg, port, branch=branch, epoch_override=epoch_override)
+    which = f"epoch {epoch_override}" if epoch_override is not None else "the current epoch"
+    click.echo(f"Serving {which} at http://localhost:{server.server_port}/")
+    click.echo("Press Ctrl-C to stop.")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
 
 
-def _run_server(cfg, epoch: int, epoch_dir: Path, report_html: Path, port: int, branch: str = "") -> None:
-    """Start a stdlib-based HTTP server with diff API."""
+# Served in place of a missing running.js so the report's run-log poller sees "no active run"
+# without the browser logging a 404 on every page load / poll.
+_NO_RUNNING_JS = b"window.__runLogAbsent=true;\n"
+
+
+def _inject_server_mode(report_source: str, epoch: int) -> str:
+    return report_source.replace(
+        "window.__runLog=[];",
+        f"window.__runLog=[];\nwindow.__serverMode=true;\nwindow.__serverEpoch={epoch};",
+        1,
+    )
+
+
+def _waiting_for_report_html(epoch: int) -> str:
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta http-equiv="refresh" content="5">
+<title>branch-bench — epoch {epoch}</title>
+<style>body{{background:#0d1117;color:#e6edf3;font-family:system-ui,sans-serif;padding:2rem}}code{{color:#79c0ff}}</style>
+</head><body>
+<p>Epoch {epoch} has no report yet. Start a <code>branch-bench run</code> or <code>branch-bench report</code>; this page reloads every 5s.</p>
+</body></html>"""
+
+
+def _make_server(cfg, port: int, branch: str = "", epoch_override: int | None = None):
+    """Build a stdlib-based HTTP server with diff API (call serve_forever() on it).
+
+    Without *epoch_override* the epoch is re-resolved on every request, so the
+    server follows `branch-bench epoch` / new runs without a restart.
+    """
     import html as _html
     import http.server
     import json
@@ -681,29 +711,29 @@ def _run_server(cfg, epoch: int, epoch_dir: Path, report_html: Path, port: int, 
     from .runner import diff_pair as _diff_pair
     from .storage import Store as _Store
 
-    # Inject server-mode flag into the report HTML at serve time
-    _report_source = report_html.read_text(encoding="utf-8")
-    _report_injected = _report_source.replace(
-        "window.__runLog=[];",
-        f"window.__runLog=[];\nwindow.__serverMode=true;\nwindow.__serverEpoch={epoch};",
-        1,
-    )
+    def _current_epoch() -> int:
+        if epoch_override is not None:
+            return epoch_override
+        st = _Store(cfg.db_path())
+        try:
+            return st.current_epoch()
+        finally:
+            st.close()
 
     repo_path = Path(cfg.repo.path).resolve()
     if not branch:
         branch = git.current_ref(repo_path)
-    epoch_dir_resolved = epoch_dir.resolve()
     _DISPLAYABLE = {".svg", ".html", ".htm", ".txt"}
 
-    def _rebase(path_str: str) -> str:
+    def _rebase(path_str: str, epoch: int) -> str:
         try:
-            return str(Path(path_str).resolve().relative_to(epoch_dir_resolved))
+            return str(Path(path_str).resolve().relative_to(cfg.epoch_dir(epoch).resolve()))
         except ValueError:
             return path_str
 
-    def _displayable_profiles(store, sha: str) -> list[dict]:
+    def _displayable_profiles(store, sha: str, epoch: int) -> list[dict]:
         return [
-            {**p, "file_path": _rebase(p["file_path"])}
+            {**p, "file_path": _rebase(p["file_path"], epoch)}
             for p in store.best_profiles_for_commit(sha)
             if Path(p["file_path"]).suffix.lower() in _DISPLAYABLE
         ]
@@ -786,6 +816,9 @@ document.querySelectorAll('iframe').forEach(function(f) {{
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path.lstrip("/")
+            epoch = _current_epoch()
+            epoch_dir = cfg.epoch_dir(epoch)
+            report_html = cfg.report_path(epoch)
 
             if path in ("", "index.html"):
                 qs = urllib.parse.parse_qs(parsed.query)
@@ -794,23 +827,26 @@ document.querySelectorAll('iframe').forEach(function(f) {{
                     other_epoch = int(req_epoch_str)
                     other_report = cfg.report_path(other_epoch)
                     if other_report.exists():
-                        other_src = other_report.read_text(encoding="utf-8")
-                        other_injected = other_src.replace(
-                            "window.__runLog=[];",
-                            f"window.__runLog=[];\nwindow.__serverMode=true;\nwindow.__serverEpoch={other_epoch};",
-                            1,
-                        )
+                        other_injected = _inject_server_mode(other_report.read_text(encoding="utf-8"), other_epoch)
                         self._send(200, "text/html; charset=utf-8", other_injected.encode())
                     else:
                         self._send(404, "text/plain",
                                    f"Epoch {other_epoch} report not found. Run `branch-bench report --epoch {other_epoch}` first.".encode())
+                elif report_html.exists():
+                    injected = _inject_server_mode(report_html.read_text(encoding="utf-8"), epoch)
+                    self._send(200, "text/html; charset=utf-8", injected.encode())
                 else:
-                    self._send(200, "text/html; charset=utf-8", _report_injected.encode())
+                    self._send(200, "text/html; charset=utf-8", _waiting_for_report_html(epoch).encode())
                 return
 
             if path == "api/report-mtime":
+                # Keyed on the epoch too, so switching epoch also flags the open page as stale
                 mtime = report_html.stat().st_mtime if report_html.exists() else 0
-                self._send(200, "application/json", json.dumps({"mtime": mtime}).encode())
+                self._send(200, "application/json", json.dumps({"mtime": mtime, "epoch": epoch}).encode())
+                return
+
+            if path == "running.js" and not (epoch_dir / path).is_file():
+                self._send(200, "text/javascript", _NO_RUNNING_JS)
                 return
 
             if path in ("api/diffs", "api/diff-view"):
@@ -836,9 +872,9 @@ document.querySelectorAll('iframe').forEach(function(f) {{
                         self._send(404, "application/json", json.dumps({"error": "commit not found"}).encode())
                         return
                     raw_diffs = store.diffs_for_pair(left_commit.sha, right_commit.sha)
-                    rebased = [{**d, "diff_path": _rebase(d["diff_path"])} for d in raw_diffs]
-                    lprofs = _displayable_profiles(store, left_commit.sha)
-                    rprofs = _displayable_profiles(store, right_commit.sha)
+                    rebased = [{**d, "diff_path": _rebase(d["diff_path"], epoch)} for d in raw_diffs]
+                    lprofs = _displayable_profiles(store, left_commit.sha, epoch)
+                    rprofs = _displayable_profiles(store, right_commit.sha, epoch)
 
                     if path == "api/diff-view":
                         # Build full-screen view from URL params
@@ -899,6 +935,7 @@ document.querySelectorAll('iframe').forEach(function(f) {{
                 self._send(400, "application/json", json.dumps({"error": "left_sha and right_sha required"}).encode())
                 return
 
+            epoch = _current_epoch()
             store = _Store(cfg.db_path(), epoch_override=epoch)
             try:
                 # Find commits
@@ -930,9 +967,9 @@ document.querySelectorAll('iframe').forEach(function(f) {{
                 )
 
                 raw_diffs = store.diffs_for_pair(left_commit.sha, right_commit.sha)
-                rebased = [{**d, "diff_path": _rebase(d["diff_path"])} for d in raw_diffs]
-                lprofs = _displayable_profiles(store, left_commit.sha)
-                rprofs = _displayable_profiles(store, right_commit.sha)
+                rebased = [{**d, "diff_path": _rebase(d["diff_path"], epoch)} for d in raw_diffs]
+                lprofs = _displayable_profiles(store, left_commit.sha, epoch)
+                rprofs = _displayable_profiles(store, right_commit.sha, epoch)
                 resp = json.dumps({
                     "diffs": rebased,
                     "left_profiles": lprofs,
@@ -943,10 +980,4 @@ document.querySelectorAll('iframe').forEach(function(f) {{
             finally:
                 store.close()
 
-    server = http.server.HTTPServer(("", port), Handler)
-    click.echo(f"Serving epoch {epoch} at http://localhost:{port}/")
-    click.echo("Press Ctrl-C to stop.")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
+    return http.server.HTTPServer(("", port), Handler)
