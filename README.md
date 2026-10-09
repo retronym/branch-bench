@@ -122,6 +122,8 @@ All commands accept `--config PATH` to point at a `bench.toml` in a non-default 
 | `--no-live-report` | off | Disable per-commit report regeneration during the run |
 | `-v` / `--verbose` | off | Stream bench command output live as it runs. `-vv` also streams the test command |
 | `--epoch N` | current | Run in a specific past epoch instead of the current one |
+| `--diff` | off | Run `[diff]` tools after each commit (`--strategy linear` only) |
+| `--diff-vs previous\|REF` | `previous` | Diff target, repeatable. `previous` is the nearest earlier commit *on the branch* that has profiles in this epoch, so `--sha` runs diff against their real predecessor. `branch-bench profile --diff` behaves the same |
 
 All ref arguments are resolved to full SHAs via `git rev-parse` before anything runs, so the resolved SHA is what gets stored and shown in the report. The log line confirms each resolution:
 

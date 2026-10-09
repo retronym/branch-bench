@@ -126,7 +126,7 @@ def init() -> None:
     show_default=True,
     help=(
         "What to diff each commit against. Repeatable. "
-        "'previous' = the preceding commit in the linear walk; "
+        "'previous' = the nearest earlier commit on the branch with profiles in this epoch; "
         "any git ref (SHA, tag, branch) = diff vs that fixed commit. "
         "Example: --diff-vs previous --diff-vs abc1234"
     ),
@@ -224,7 +224,10 @@ def run(
     type=str,
     default=("previous",),
     show_default=True,
-    help="What to diff against: 'previous' or a git ref. Repeatable.",
+    help=(
+        "What to diff against. Repeatable. 'previous' = the nearest earlier commit "
+        "on the branch with profiles in this epoch; or any git ref."
+    ),
 )
 def profile_cmd(
     config: str,

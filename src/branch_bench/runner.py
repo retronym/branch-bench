@@ -694,6 +694,7 @@ def run_branch(
                     commit=commit,
                     idx=idx,
                     run_commits=run_commits,
+                    branch_commits=all_commits,
                     diff_vs=resolved_diff_vs,
                     cfg=cfg,
                     store=store,
@@ -728,10 +729,22 @@ def run_branch(
             running_log._path.unlink(missing_ok=True)
 
 
+def _previous_profiled(commit: Commit, branch_commits: list[Commit], store: Store) -> Commit | None:
+    """The nearest commit before *commit* on the branch that has profiles in the current epoch."""
+    pos = next((i for i, c in enumerate(branch_commits) if c.sha == commit.sha), None)
+    if pos is None:
+        return None
+    for c in reversed(branch_commits[:pos]):
+        if store.best_profiles_for_commit(c.sha):
+            return c
+    return None
+
+
 def _run_inline_diffs(
     commit: Commit,
     idx: int,
     run_commits: list[Commit],
+    branch_commits: list[Commit],
     diff_vs: tuple[str, ...],
     cfg: Config,
     store: Store,
@@ -740,16 +753,20 @@ def _run_inline_diffs(
     branch: str,
     log: Callable[[str], None],
 ) -> None:
-    """Run diffs after a commit in a linear walk.
+    """Run diffs after a commit has been profiled.
 
     *diff_vs* is a tuple of targets:
-      'previous'  — diff vs the preceding commit in the walk
+      'previous'  — diff vs the nearest earlier commit on the branch that has
+                    profiles in this epoch (so `--sha` runs diff against their
+                    real predecessor); falls back to the preceding commit in the walk
       <full SHA>  — diff vs that fixed commit (resolved upstream)
     """
     diff_vs_set = set(diff_vs)
 
-    if "previous" in diff_vs_set and idx > 0:
+    prev = _previous_profiled(commit, branch_commits, store) if "previous" in diff_vs_set else None
+    if prev is None and "previous" in diff_vs_set and idx > 0:
         prev = run_commits[idx - 1]
+    if prev is not None:
         diff_pair(
             left_sha=prev.sha,
             left_short_sha=prev.short_sha,
@@ -915,6 +932,7 @@ def profile_branch(
                     commit=commit,
                     idx=list_idx,
                     run_commits=run_commits,
+                    branch_commits=all_commits,
                     diff_vs=resolved_diff_vs,
                     cfg=cfg,
                     store=store,
